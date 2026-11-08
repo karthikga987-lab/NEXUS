@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.db.init_db import init_db
+
 from app.api.routes import companies, proposals, feedback
 
 app = FastAPI(
@@ -19,9 +19,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.on_event("startup")
-def on_startup():
-    init_db()
 
 app.include_router(companies.router, prefix="/api/companies", tags=["Companies"])
 app.include_router(proposals.router, prefix="/api/proposals", tags=["Proposals"])
