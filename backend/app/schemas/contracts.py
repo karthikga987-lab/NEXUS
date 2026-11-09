@@ -24,8 +24,10 @@ class SourceOut(BaseModel):
     event_date: datetime | None
     source_type: str
     processing_status: str
-    model_config = ConfigDict(from_attributes=True)
 
+    content_text: str | None  # ADD THIS
+
+    model_config = ConfigDict(from_attributes=True)
 class EventOut(BaseModel):
     id: str
     company_id: str
