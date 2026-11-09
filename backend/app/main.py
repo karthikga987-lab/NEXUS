@@ -1,9 +1,11 @@
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.db.init_db import init_db
 from app.api.routes import companies, proposals, feedback
+from app.feedback import csv_upload
 
 app = FastAPI(
     title="NEXUS API",
@@ -26,6 +28,7 @@ def on_startup():
 app.include_router(companies.router, prefix="/api/companies", tags=["Companies"])
 app.include_router(proposals.router, prefix="/api/proposals", tags=["Proposals"])
 app.include_router(feedback.router, prefix="/api/feedback", tags=["Feedback"])
+app.include_router(csv_upload.router, prefix="/api/feedback", tags=["CSV Upload"])
 
 @app.get("/health", tags=["Health"])
 def health():
