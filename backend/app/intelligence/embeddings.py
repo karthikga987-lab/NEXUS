@@ -12,6 +12,7 @@ from app.models import Company, DocumentEmbedding, SourceDocument
 
 OLLAMA_EMBED_URL = "http://localhost:11434/api/embed"
 EMBEDDING_MODEL = "nomic-embed-text"
+EMBEDDING_DIMENSIONS = 768
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
@@ -144,6 +145,12 @@ def generate_embeddings(texts: list[str]) -> list[list[float]]:
         validated_vectors.append(validated)
 
     dimensions = len(validated_vectors[0])
+
+    if dimensions != EMBEDDING_DIMENSIONS:
+        raise EmbeddingError(
+            f"Expected {EMBEDDING_DIMENSIONS}-dimensional embeddings, "
+            f"received {dimensions} dimensions."
+        )
 
     if any(len(vector) != dimensions for vector in validated_vectors):
         raise EmbeddingError(
@@ -430,3 +437,4 @@ def search_external_public_chunks(
         results=results,
         limit=limit,
     )
+
