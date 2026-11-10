@@ -8,3 +8,5 @@ psycopg[binary]>=3.2,<4.0
 python-multipart>=0.0.9
 
 alembic>=1.13,<2.0
+networkx>=3.2,<4.0
+certifi>=2026.10.23

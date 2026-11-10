@@ -1,10 +1,14 @@
+
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+
+from pydantic import BaseModel, ConfigDict, Field
+
 
 class CompanyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     website: str | None = None
     description: str | None = None
+
 
 class CompanyOut(BaseModel):
     id: str
@@ -12,7 +16,9 @@ class CompanyOut(BaseModel):
     website: str | None
     description: str | None
     created_at: datetime
+
     model_config = ConfigDict(from_attributes=True)
+
 
 class SourceOut(BaseModel):
     id: str
@@ -21,10 +27,12 @@ class SourceOut(BaseModel):
     publisher: str | None
     title: str | None
     publication_date: datetime | None
-    event_date: datetime | None
+    event_date: datetime | None = None
     source_type: str
     processing_status: str
+
     model_config = ConfigDict(from_attributes=True)
+
 
 class EventOut(BaseModel):
     id: str
@@ -38,12 +46,15 @@ class EventOut(BaseModel):
     reported_outcome: str | None
     evidence_classification: str
     source_ids: list[str]
+
     model_config = ConfigDict(from_attributes=True)
+
 
 class ProposalAnalyzeIn(BaseModel):
     company_id: str
     title: str = Field(min_length=1, max_length=500)
     description: str = Field(min_length=20)
+
 
 class FeedbackCreate(BaseModel):
     company_id: str
