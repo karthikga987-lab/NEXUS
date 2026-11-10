@@ -1,4 +1,4 @@
-
+﻿
 from __future__ import annotations
 
 import json
@@ -30,7 +30,7 @@ OLLAMA_URL = os.getenv(
 
 OLLAMA_MODEL = os.getenv(
     "NEXUS_OLLAMA_MODEL",
-    "llama3.2:3b",
+    "qwen3:8b",
 )
 
 VERIFICATION_METHOD = "ollama_semantic_verification_v1"

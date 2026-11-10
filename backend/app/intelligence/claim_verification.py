@@ -1,4 +1,4 @@
-import json
+﻿import json
 import logging
 import os
 import re
@@ -16,7 +16,7 @@ OLLAMA_URL = os.getenv(
 )
 OLLAMA_MODEL = os.getenv(
     "NEXUS_OLLAMA_MODEL",
-    "llama3.2:3b",
+    "qwen3:8b",
 )
 
 VERIFICATION_TIMEOUT = 180

@@ -1,4 +1,4 @@
-
+﻿
 import json
 import logging
 import os
@@ -17,7 +17,7 @@ OLLAMA_URL = os.getenv(
 
 OLLAMA_MODEL = os.getenv(
     "NEXUS_OLLAMA_MODEL",
-    "llama3.2:3b",
+    "qwen3:8b",
 )
 
 EVENT_TYPES = {
@@ -370,9 +370,18 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
     last_error: Exception | None = None
 
     for attempt in range(2):
+        request_payload = dict(payload)
+        request_payload["options"] = {
+            **payload["options"],
+            "num_predict": 2048 if attempt == 0 else 4096,
+        }
+
+        done_reason = "unavailable"
+        content_length = 0
+
         request = urllib.request.Request(
             OLLAMA_URL,
-            data=json.dumps(payload).encode("utf-8"),
+            data=json.dumps(request_payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -380,6 +389,13 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
                 result = json.loads(response.read().decode("utf-8"))
+
+            if not isinstance(result, dict):
+                raise ExtractionError(
+                    "Ollama returned an invalid response object."
+                )
+
+            done_reason = str(result.get("done_reason", "not provided"))
 
             message = result.get("message")
             if not isinstance(message, dict):
@@ -393,6 +409,7 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
                     "Ollama returned an empty event-extraction response."
                 )
 
+            content_length = len(content)
             parsed = json.loads(content)
 
             if not isinstance(parsed, dict):
@@ -403,6 +420,14 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
                 raise ExtractionError(
                     "Model response must contain an events array; "
                     f"received top-level keys: {keys}."
+                )
+
+            if attempt > 0:
+                logger.info(
+                    "Event extraction succeeded on retry with "
+                    "num_predict=4096 (done_reason=%s, response_chars=%s).",
+                    done_reason,
+                    content_length,
                 )
 
             return parsed
@@ -419,7 +444,8 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
             )
             if attempt == 0 and exc.code in {500, 502, 503, 504}:
                 logger.warning(
-                    "Ollama returned HTTP %s during event extraction; retrying once.",
+                    "Ollama returned HTTP %s during event extraction; "
+                    "retrying with a larger output budget.",
                     exc.code,
                 )
                 time.sleep(2)
@@ -432,7 +458,8 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
             )
             if attempt == 0:
                 logger.warning(
-                    "Ollama connection failed during event extraction; retrying once: %s",
+                    "Ollama connection failed during event extraction; "
+                    "retrying once: %s",
                     exc,
                 )
                 time.sleep(2)
@@ -442,19 +469,31 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
         except (json.JSONDecodeError, KeyError, TypeError, ExtractionError) as exc:
             last_error = (
                 exc if isinstance(exc, ExtractionError)
-                else ExtractionError("Ollama returned an invalid extraction response.")
+                else ExtractionError(
+                    "Ollama returned an invalid extraction response."
+                )
             )
             if attempt == 0:
                 logger.warning(
-                    "Ollama returned an invalid event-extraction response; retrying once: %s",
+                    "Invalid event-extraction response; retrying with "
+                    "num_predict=4096 "
+                    "(done_reason=%s, response_chars=%s): %s",
+                    done_reason,
+                    content_length,
                     last_error,
                 )
                 time.sleep(2)
                 continue
+
+            logger.error(
+                "Event extraction failed after retry "
+                "(done_reason=%s, response_chars=%s).",
+                done_reason,
+                content_length,
+            )
             raise last_error from exc
 
     raise ExtractionError(f"Event extraction failed after retry: {last_error}")
-
 
 def _is_exact_quote(quote: Any, source_text: str) -> bool:
     """Return True only when the exact quotation occurs in the source."""
