@@ -98,9 +98,13 @@ Before starting a task, pull the latest `main`. Commit and push only your branch
 - `POST /api/companies`
 - `GET /api/companies`
 - `GET /api/companies/{company_id}`
-- `POST /api/companies/{company_id}/research` – placeholder job response; Member 2 implements the research pipeline
+- `POST /api/companies/{company_id}/research` – synchronous public-source discovery and collection
 - `GET /api/companies/{company_id}/sources`
 - `GET /api/companies/{company_id}/events`
+- `POST /api/companies/{company_id}/internal-sources` – import attributed internal text
+- `POST /api/companies/{company_id}/extract-events` – extract events and knowledge items
+- `GET /api/companies/{company_id}/knowledge-items`
+- `GET/POST /api/companies/{company_id}/event-relationships`
 - `POST /api/proposals/analyze` – placeholder analysis response; Member 3 implements evidence-grounded analysis
 - `POST /api/feedback`
 - `GET /api/feedback/analysis/{company_id}`
@@ -109,4 +113,4 @@ See `docs/API_CONTRACT.md` for payload examples.
 
 ## Important
 
-The scaffold does not yet crawl websites, call Ollama, calculate sentiment, or produce validated recommendations. Those are the feature modules the team will implement. The placeholder endpoints must not be presented as completed AI functionality.
+Member 2’s external and internal source pipeline is implemented in `backend/app/research/`. Proposal analysis and feedback sentiment/topic analysis remain placeholders for their owning members. Gemini extraction requires `GEMINI_API_KEY`; private service integrations require separate authorized connectors.
