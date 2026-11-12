@@ -25,12 +25,10 @@ const navigationItems = [
   { id: "ai-assistant", label: "AI Assistant", icon: Bot },
 ];
 
-export default function CompanySidebar({ onNavigate }) {
+export default function CompanySidebar({ activeSection = "overview", onNavigate }) {
   const [collapsed, setCollapsed] = useState(false);
-  const [activeItem, setActiveItem] = useState("overview");
 
   function handleNavigation(id) {
-    setActiveItem(id);
     onNavigate?.(id);
   }
 
@@ -56,7 +54,7 @@ export default function CompanySidebar({ onNavigate }) {
             <button
               key={item.id}
               className={`sidebar-link ${
-                activeItem === item.id ? "active" : ""
+                activeSection === item.id ? "active" : ""
               }`}
               aria-label={item.label}
               title={item.label}

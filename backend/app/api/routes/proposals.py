@@ -1,4 +1,4 @@
-
+﻿
 import logging
 import os
 import re
@@ -57,6 +57,94 @@ if not -1.0 <= PROPOSAL_INTERNAL_MIN_SIMILARITY <= 1.0:
 router = APIRouter()
 
 MAX_CUSTOMER_FEEDBACK = 30
+
+
+@router.get("/company/{company_id}", status_code=200)
+def list_company_proposals(
+    company_id: str,
+    db: Session = Depends(get_db),
+):
+    """List persisted proposals and their analysis IDs for one company."""
+    company = db.get(Company, company_id)
+    if company is None:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    proposals = (
+        db.query(Proposal)
+        .filter(Proposal.company_id == company_id)
+        .order_by(Proposal.created_at.desc())
+        .all()
+    )
+    proposal_ids = [proposal.id for proposal in proposals]
+    if not proposal_ids:
+        return []
+
+    analyses = (
+        db.query(ProposalAnalysis)
+        .filter(ProposalAnalysis.proposal_id.in_(proposal_ids))
+        .order_by(ProposalAnalysis.created_at.desc())
+        .all()
+    )
+    analysis_ids = [analysis.id for analysis in analyses]
+    restricted_analysis_ids = set()
+    if analysis_ids:
+        restricted_analysis_ids = {
+            row[0]
+            for row in (
+                db.query(AnalysisEvidence.analysis_id)
+                .join(
+                    SourceDocument,
+                    AnalysisEvidence.source_id == SourceDocument.id,
+                )
+                .filter(
+                    AnalysisEvidence.analysis_id.in_(analysis_ids),
+                    SourceDocument.permission_status != "public",
+                )
+                .distinct()
+                .all()
+            )
+        }
+
+    analyses_by_proposal = {}
+    for analysis in analyses:
+        accessible = analysis.id not in restricted_analysis_ids
+        item = {
+            "id": analysis.id,
+            "status": analysis.status if accessible else "restricted",
+            "accessible": accessible,
+            "created_at": analysis.created_at,
+            "completed_at": analysis.completed_at,
+        }
+        if accessible:
+            item.update({
+                "recommendation": analysis.recommendation,
+                "risks": analysis.risks,
+                "limitations": analysis.limitations,
+            })
+        analyses_by_proposal.setdefault(analysis.proposal_id, []).append(item)
+
+    return [
+        {
+            "id": proposal.id,
+            "company_id": proposal.company_id,
+            "title": proposal.title,
+            "description": proposal.description,
+            "status": proposal.status,
+            "workflow_status": (
+                "completed"
+                if any(
+                    analysis["accessible"]
+                    and analysis["status"] == "completed"
+                    for analysis in analyses_by_proposal.get(proposal.id, [])
+                )
+                else proposal.status
+            ),
+            "created_at": proposal.created_at,
+            "updated_at": proposal.updated_at,
+            "analyses": analyses_by_proposal.get(proposal.id, []),
+        }
+        for proposal in proposals
+    ]
 
 # Common words are excluded from simple keyword-based feedback matching.
 FEEDBACK_STOPWORDS = {
@@ -139,23 +227,36 @@ def _build_company_graph_context(
     }
 
 
+
 def _get_customer_feedback(
     db: Session,
     company_id: str,
+    public_only: bool = False,
 ) -> list[dict]:
     """
     Retrieve recent, processed feedback for the proposing company.
 
-    Feedback is supplied separately from document evidence and is
-    never added to the document citation source pool.
+    When public_only is True, only feedback linked to public source
+    documents is returned. This mode is used by unauthenticated
+    saved-analysis retrieval.
     """
 
-    items = (
-        db.query(Feedback)
-        .filter(
-            Feedback.company_id == company_id,
-            Feedback.analysis_status == "completed",
+    query = db.query(Feedback).filter(
+        Feedback.company_id == company_id,
+        Feedback.analysis_status == "completed",
+    )
+
+    if public_only:
+        query = (
+            query.join(
+                SourceDocument,
+                Feedback.source_id == SourceDocument.id,
+            )
+            .filter(SourceDocument.permission_status == "public")
         )
+
+    items = (
+        query
         .order_by(Feedback.collected_at.desc())
         .limit(MAX_CUSTOMER_FEEDBACK)
         .all()
@@ -175,17 +276,12 @@ def _get_customer_feedback(
     topics_by_feedback_id: dict[str, list[str]] = {}
 
     for row in topic_rows:
-        topics_by_feedback_id.setdefault(
-            row.feedback_id,
-            [],
-        ).append(row.topic)
+        topics_by_feedback_id.setdefault(row.feedback_id, []).append(row.topic)
 
     results = []
 
     for item in items:
-        feedback_date = (
-            item.created_at_source or item.collected_at
-        )
+        feedback_date = item.created_at_source or item.collected_at
 
         results.append({
             "feedback_id": item.id,
@@ -199,15 +295,14 @@ def _get_customer_feedback(
                 if feedback_date is not None
                 else None
             ),
-            "topics": sorted(
-                topics_by_feedback_id.get(item.id, [])
-            ),
+            "topics": sorted(topics_by_feedback_id.get(item.id, [])),
             "source_id": item.source_id,
             "source_url": item.source_url,
             "external_reference": item.external_reference,
         })
 
     return results
+
 
 
 def _get_eligible_source_ids(
@@ -932,9 +1027,12 @@ def get_proposal_analysis(
         .all()
     )
 
-    # The API has no authentication layer, so a saved analysis backed by
-    # non-public documents must not be returned through this public route.
-    if any(source.permission_status != "public" for _, source, _ in evidence_rows):
+    # Do not expose saved analyses backed by private or internal sources
+    # through this unauthenticated endpoint.
+    if any(
+        source.permission_status != "public"
+        for _, source, _ in evidence_rows
+    ):
         raise HTTPException(
             status_code=404,
             detail="Proposal analysis not found",
@@ -989,6 +1087,61 @@ def get_proposal_analysis(
 
     saved_claims = list(claims_by_statement.values())
 
+    # Rebuild the public company knowledge graph from current persisted data.
+    # The graph builder filters event and relationship sources by permission.
+    company_knowledge_context = _build_company_graph_context(
+        db=db,
+        company_id=proposal.company_id,
+    )
+
+    company_knowledge_context["interpretation_warning"] += (
+        " This context was refreshed from currently stored public company "
+        "records when the saved analysis was reopened; it is not an original "
+        "analysis-time snapshot."
+    )
+
+    # Only retrieve feedback explicitly linked to public source documents.
+    public_feedback = _get_customer_feedback(
+        db=db,
+        company_id=proposal.company_id,
+        public_only=True,
+    )
+
+    relevant_public_feedback = _get_proposal_relevant_feedback(
+        feedback=public_feedback,
+        proposal_title=proposal.title,
+        proposal_description=proposal.description,
+    )
+
+    public_feedback_count = (
+        db.query(Feedback.id)
+        .join(
+            SourceDocument,
+            Feedback.source_id == SourceDocument.id,
+        )
+        .filter(
+            Feedback.company_id == proposal.company_id,
+            Feedback.analysis_status == "completed",
+            SourceDocument.permission_status == "public",
+        )
+        .count()
+    )
+
+    customer_feedback_context = {
+        "feedback_count": len(relevant_public_feedback),
+        "total_company_feedback_available": public_feedback_count,
+        "feedback": relevant_public_feedback,
+        "interpretation_warning": (
+            "This feedback was refreshed from currently stored records "
+            "linked to public source documents when the saved analysis "
+            "was reopened. It is not an original analysis-time snapshot. "
+            "Feedback is a separate customer signal, not documentary proof "
+            "of product events, business outcomes or causation. "
+            "Keyword matching does not establish semantic relevance or "
+            "representativeness."
+        ),
+    }
+
     return {
         "analysis_id": analysis.id,
         "status": analysis.status,
@@ -1005,4 +1158,7 @@ def get_proposal_analysis(
         "risks": analysis.risks,
         "limitations": analysis.limitations,
         "claims": saved_claims,
+        "company_knowledge_context": company_knowledge_context,
+        "customer_feedback_context": customer_feedback_context,
+        "context_retrieval_mode": "refreshed_current_public_company_data",
     }

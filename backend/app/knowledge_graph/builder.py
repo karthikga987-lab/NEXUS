@@ -8,10 +8,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.entities import (
+    AnalysisEvidence,
     Company,
     EventRelationship,
+    Proposal,
+    ProposalAnalysis,
     ProductEvent,
     SourceDocument,
+    analysis_events,
     event_sources,
     relationship_sources,
 )
@@ -352,6 +356,130 @@ def build_company_graph(
                 )
             ),
         )
+
+    # Show a proposal in the graph only when its saved analysis has an
+    # explicit public source or product-event association. Proposal text is
+    # never treated as a historical event, and internal-source analyses are
+    # excluded from this unauthenticated graph response.
+    proposal_analysis_rows = (
+        db.query(Proposal, ProposalAnalysis)
+        .join(ProposalAnalysis, ProposalAnalysis.proposal_id == Proposal.id)
+        .filter(Proposal.company_id == company_id)
+        .all()
+    )
+    analyses_by_proposal: dict[str, list[ProposalAnalysis]] = {}
+    analysis_by_id: dict[str, ProposalAnalysis] = {}
+    proposal_by_id: dict[str, Proposal] = {}
+    for proposal, analysis in proposal_analysis_rows:
+        analyses_by_proposal.setdefault(proposal.id, []).append(analysis)
+        analysis_by_id[analysis.id] = analysis
+        proposal_by_id[proposal.id] = proposal
+
+    evidence_by_analysis: dict[str, list[tuple[AnalysisEvidence, SourceDocument]]] = {}
+    restricted_analysis_ids: set[str] = set()
+    if analysis_by_id:
+        evidence_rows = (
+            db.query(AnalysisEvidence, SourceDocument)
+            .join(SourceDocument, SourceDocument.id == AnalysisEvidence.source_id)
+            .filter(AnalysisEvidence.analysis_id.in_(list(analysis_by_id)))
+            .all()
+        )
+        for evidence, source in evidence_rows:
+            evidence_by_analysis.setdefault(evidence.analysis_id, []).append(
+                (evidence, source)
+            )
+            if source.permission_status != "public":
+                restricted_analysis_ids.add(evidence.analysis_id)
+
+    event_ids_by_analysis: dict[str, set[str]] = {}
+    if analysis_by_id:
+        for row in db.execute(
+            select(
+                analysis_events.c.analysis_id,
+                analysis_events.c.event_id,
+            ).where(analysis_events.c.analysis_id.in_(list(analysis_by_id)))
+        ).all():
+            event_ids_by_analysis.setdefault(row.analysis_id, set()).add(
+                row.event_id
+            )
+
+    for proposal_id, proposal in proposal_by_id.items():
+        source_links = []
+        event_links: set[tuple[str, str]] = set()
+        for analysis in analyses_by_proposal.get(proposal_id, []):
+            if analysis.id in restricted_analysis_ids:
+                continue
+            for evidence, source in evidence_by_analysis.get(analysis.id, []):
+                if source.id in source_by_id:
+                    source_links.append((analysis, evidence, source))
+                if evidence.event_id in event_by_id:
+                    event_links.add((analysis.id, evidence.event_id))
+            for event_id in event_ids_by_analysis.get(analysis.id, set()):
+                if event_id in event_by_id:
+                    event_links.add((analysis.id, event_id))
+
+        # Only graph proposals with an explicitly persisted eligible link.
+        if not source_links and not event_links:
+            continue
+
+        proposal_node = f"proposal:{proposal.id}"
+        latest_analysis = max(
+            analyses_by_proposal[proposal_id],
+            key=lambda item: item.created_at,
+        )
+        graph.add_node(
+            proposal_node,
+            node_type="proposal",
+            proposal_id=proposal.id,
+            company_id=proposal.company_id,
+            title=proposal.title,
+            description=proposal.description,
+            proposal_status=proposal.status,
+            analysis_status=(
+                latest_analysis.status
+                if latest_analysis.id not in restricted_analysis_ids
+                else "restricted"
+            ),
+            created_at=_safe_value(proposal.created_at),
+            historical_event=False,
+            interpretation_warning=(
+                "User-submitted proposal; not a documented company event or decision."
+            ),
+        )
+        graph.add_edge(
+            company_node,
+            proposal_node,
+            relation_type="HAS_PROPOSAL",
+            provenance_status="persisted_company_proposal_association",
+        )
+
+        for analysis, evidence, source in source_links:
+            graph.add_edge(
+                proposal_node,
+                f"source:{source.id}",
+                key=evidence.id,
+                analysis_evidence_id=evidence.id,
+                analysis_id=analysis.id,
+                relation_type="CITES_SOURCE",
+                analysis_claim=evidence.claim,
+                evidence_classification=_safe_value(
+                    evidence.evidence_classification
+                ),
+                provenance_status="persisted_analysis_evidence_source_link",
+            )
+
+        for analysis_id, event_id in sorted(event_links):
+            graph.add_edge(
+                proposal_node,
+                f"event:{event_id}",
+                key=f"{analysis_id}:{event_id}",
+                analysis_id=analysis_id,
+                relation_type="ANALYZES_EVENT",
+                provenance_status="explicit_proposal_analysis_event_link",
+                interpretation_warning=(
+                    "Stored proposal-to-event association; it does not establish causation or a historical outcome."
+                ),
+            )
 
     return graph
 

@@ -14,6 +14,24 @@ import {
 import { api } from './api/client';
 import CompanyDashboard from './components/CompanyDashboard';
 
+const SELECTED_COMPANY_SESSION_KEY = 'nexus.selectedCompanyId';
+
+function readSelectedCompanyId() {
+  try {
+    return window.sessionStorage.getItem(SELECTED_COMPANY_SESSION_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function storeSelectedCompanyId(companyId) {
+  try {
+    window.sessionStorage.setItem(SELECTED_COMPANY_SESSION_KEY, companyId);
+  } catch {
+    // The workspace remains usable when browser session storage is unavailable.
+  }
+}
+
 export default function App() {
   const [company, setCompany] = useState('');
   const [companyWebsite, setCompanyWebsite] = useState('');
@@ -22,7 +40,9 @@ export default function App() {
   const [message, setMessage] = useState('');
   const [apiStatus, setApiStatus] = useState('Checking API...');
   const [selectedCompany, setSelectedCompany] = useState(null);
+  const [rememberedCompanyId] = useState(readSelectedCompanyId);
   const [loadingCompanies, setLoadingCompanies] = useState(true);
+  const [restoringWorkspace, setRestoringWorkspace] = useState(Boolean(rememberedCompanyId));
 
   useEffect(() => {
     api.health()
@@ -31,11 +51,36 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let active = true;
     api.companies()
-      .then(setItems)
-      .catch((error) => setMessage(`Company workspaces could not be loaded: ${error.message}`))
-      .finally(() => setLoadingCompanies(false));
-  }, []);
+      .then((companies) => {
+        if (!active) return;
+        const savedCompanies = Array.isArray(companies) ? companies : [];
+        setItems(savedCompanies);
+        if (rememberedCompanyId) {
+          const rememberedCompany = savedCompanies.find(
+            (item) => item.id === rememberedCompanyId,
+          );
+          if (rememberedCompany) {
+            setSelectedCompany(rememberedCompany);
+          } else {
+            setMessage('The previously selected company is not available in the company list.');
+          }
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setMessage(`Company workspaces could not be loaded: ${error.message}`);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setLoadingCompanies(false);
+          setRestoringWorkspace(false);
+        }
+      });
+    return () => { active = false; };
+  }, [rememberedCompanyId]);
 
   async function addCompany(e) {
 e.preventDefault();
@@ -55,6 +100,7 @@ name: companyName,
 setItems((old) => [created, ...old]);
 setCompany('');
       setCompanyWebsite('');
+storeSelectedCompanyId(created.id);
 setSelectedCompany(created);
 } catch (err) {
       setMessage(`Could not create company: ${err.message}`);
@@ -64,11 +110,21 @@ setBusy(false);
 }
 
   function openCompany(item) {
+    storeSelectedCompanyId(item.id);
     setSelectedCompany(item);
   }
 
   function returnHome() {
+    try {
+      window.sessionStorage.removeItem(SELECTED_COMPANY_SESSION_KEY);
+    } catch {
+      // Returning to the company list must not depend on session storage.
+    }
     setSelectedCompany(null);
+  }
+
+  if (restoringWorkspace) {
+    return <main className="shell"><div className="empty" role="status">Restoring selected company workspace…</div></main>;
   }
 
   if (selectedCompany) {
@@ -211,7 +267,7 @@ setBusy(false);
               </button>
             ))}
           </div>
-        ) : (
+        ) : message ? null : (
           <div className="empty">No saved company workspaces are available.</div>
         )}
       </section>

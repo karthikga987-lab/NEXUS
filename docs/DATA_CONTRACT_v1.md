@@ -818,6 +818,8 @@ Base prefix: /api
 
 \- POST /api/proposals/analyze
 
+\- GET /api/proposals/company/{company_id} — list persisted proposals and their analysis IDs for the specified company.
+
 \- GET /api/proposals/{analysis\_id}
 
 

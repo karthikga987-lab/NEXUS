@@ -129,3 +129,190 @@
   font-size: 11px;
   text-align: center;
 }
+.ai-saved-proposals {
+  display: grid;
+  gap: 9px;
+  margin-top: 13px;
+  padding: 12px;
+  border: 1px solid rgba(177, 143, 255, 0.2);
+  border-radius: 10px;
+  background: rgba(139, 99, 207, 0.08);
+}
+
+.ai-saved-proposals h4 {
+  margin: 0;
+  color: #dfd0fa;
+  font-size: 11px;
+}
+
+.ai-saved-proposals > p {
+  margin: 0;
+  color: #a99dbb;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.ai-saved-proposals article {
+  display: grid;
+  gap: 5px;
+  padding: 9px 0 0;
+  border-top: 1px solid rgba(177, 143, 255, 0.12);
+}
+
+.ai-saved-proposals article strong {
+  color: #f2eaff;
+  font-size: 11px;
+}
+
+.ai-saved-proposals article span,
+.ai-saved-proposals article small {
+  color: #a99dbb;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.ai-saved-proposals article p {
+  margin: 0;
+  color: #d1c7e0;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+/* Saved proposal context sits on a light surface, so keep all text dark. */
+.ai-saved-proposals {
+  border-color: #c9bce8;
+  background: #f4f0ff;
+}
+
+.ai-saved-proposals h4,
+.ai-saved-proposals article strong {
+  color: #302448;
+}
+
+.ai-saved-proposals > p,
+.ai-saved-proposals article span,
+.ai-saved-proposals article small,
+.ai-saved-proposals article p {
+  color: #514866;
+}
+
+.ai-proposal-answer,
+.ai-historical-answer {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid #c9bce8;
+  border-radius: 12px;
+  background: #f5f1ff;
+  color: #302a3b;
+}
+
+.ai-historical-answer {
+  border-color: #d8d5df;
+  background: #faf9fc;
+}
+
+.ai-proposal-answer-heading,
+.ai-historical-answer-heading,
+.ai-proposal-record-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ai-proposal-answer-heading h3,
+.ai-historical-answer-heading h3 {
+  margin: 0;
+  color: #302448;
+  font-size: 14px;
+}
+
+.ai-historical-answer-heading h3 { color: #302a3b; }
+
+.ai-proposal-answer-heading > div > p {
+  margin: 4px 0 0;
+  color: #514866;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.ai-proposal-answer-heading > span,
+.ai-proposal-record-heading > span,
+.ai-historical-answer-heading > span {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #e7def8;
+  color: #3d2a6b;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.ai-proposal-record {
+  display: grid;
+  gap: 11px;
+  padding: 13px;
+  border: 1px solid #d9cdee;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.ai-proposal-record-heading strong {
+  color: #282236;
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.ai-proposal-block h4 {
+  margin: 0 0 4px;
+  color: #423365;
+  font-size: 12px;
+}
+
+.ai-proposal-block p,
+.ai-historical-answer > p {
+  margin: 0;
+  color: #393346;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-line;
+}
+
+.ai-proposal-source-note {
+  padding-top: 9px;
+  border-top: 1px solid #e5e0ed;
+  color: #514866;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.ai-historical-answer a {
+  color: #4c35a4;
+  font-size: 12px;
+}
+
+.ai-historical-answer blockquote {
+  margin: 0;
+  color: #302a3b;
+  font-size: 13px;
+}
+
+.ai-historical-answer .ai-verified-claim,
+.ai-historical-answer .ai-citations {
+  display: grid;
+  gap: 8px;
+  padding-top: 9px;
+  border-top: 1px solid #e1dee7;
+}
+
+@media (max-width: 640px) {
+  .ai-chat-window { padding: 15px; }
+  .ai-proposal-answer,
+  .ai-historical-answer { padding: 12px; }
+  .ai-proposal-answer-heading,
+  .ai-historical-answer-heading,
+  .ai-proposal-record-heading { flex-wrap: wrap; }
+}

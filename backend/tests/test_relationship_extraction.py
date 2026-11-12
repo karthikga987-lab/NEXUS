@@ -14,6 +14,8 @@ from app.knowledge_graph.builder import build_company_graph
 from app.models.entities import (
     Company,
     EventRelationship,
+    Proposal,
+    ProposalAnalysis,
     ProductEvent,
     SourceDocument,
     event_sources,
@@ -235,6 +237,8 @@ class RelationshipPersistenceTests(unittest.TestCase):
 
         required_tables = [
             Company.__table__,
+            Proposal.__table__,
+            ProposalAnalysis.__table__,
             ProductEvent.__table__,
             SourceDocument.__table__,
             EventRelationship.__table__,
@@ -331,6 +335,8 @@ class RelationshipPersistenceTests(unittest.TestCase):
                 relationship_sources,
                 event_sources,
                 EventRelationship.__table__,
+            ProposalAnalysis.__table__,
+            Proposal.__table__,
                 ProductEvent.__table__,
                 SourceDocument.__table__,
                 Company.__table__,

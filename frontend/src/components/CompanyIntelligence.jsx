@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Activity, AlertTriangle, BrainCircuit, Building2, CalendarDays, CheckCircle2, ChevronDown, ChevronUp, Database, ExternalLink, FileText, Globe2, LoaderCircle, MessageSquare, Network, Quote, ShieldCheck, Sparkles, Workflow } from 'lucide-react';
+import { Activity, AlertTriangle, BrainCircuit, Building2, CalendarDays, CheckCircle2, ChevronDown, ChevronUp, Database, ExternalLink, FileClock, FileText, Globe2, LoaderCircle, MessageSquare, Network, Quote, ShieldCheck, Sparkles, Workflow } from 'lucide-react';
 import { api } from '../api/client';
 
 function displayValue(value) {
@@ -279,6 +279,7 @@ export default function CompanyIntelligence({
   actionBusy,
   actionMessage,
   onSubmitFeedback,
+  onOpenProposals,
   onImportInternal,
   onProcessInternal,
   includeInternalInViews,
@@ -307,6 +308,13 @@ export default function CompanyIntelligence({
   const topicCounts = (data.feedback?.trends || []).slice(0, 4);
   const collectedSources = (sources || []).filter((source) => source.content_kind !== 'search_snippet');
   const knowledgeItems = data.knowledgeItems || [];
+  const proposals = data.proposals;
+  const completedProposalAnalyses = (proposals || []).reduce(
+    (total, proposal) => total + (proposal.analyses || []).filter(
+      (analysis) => analysis.accessible && analysis.status === 'completed',
+    ).length,
+    0,
+  );
   const [isSynthetic, setIsSynthetic] = useState(false);
 
   return (
@@ -354,6 +362,12 @@ export default function CompanyIntelligence({
             {data.feedback ? data.feedback.total_feedback ?? 0 : '—'}
           </strong>
           <small>{data.feedback ? 'Available feedback records' : 'Feedback count unavailable'}</small>
+        </article>
+
+        <article className="company-summary-card">
+          <span className="summary-label">Saved proposals</span>
+          <strong className="summary-number">{proposals ? proposals.length : '—'}</strong>
+          <small>{proposals ? `${completedProposalAnalyses} available completed analysis(es)` : 'Proposal history unavailable'}</small>
         </article>
 
         <article className="company-summary-card company-processing-card">
@@ -421,6 +435,36 @@ export default function CompanyIntelligence({
             )
           ) : (
             <p className="muted">Customer feedback data is unavailable from the current API.</p>
+          )}
+        </section>
+
+        <section className="company-insights-block recent-proposals-block">
+          <div className="detail-section-title">
+            <FileClock size={17} />
+            <h3>Recent proposal activity</h3>
+          </div>
+          {loading && proposals === null ? (
+            <p className="muted">Loading saved proposal history…</p>
+          ) : proposals === null ? (
+            <p className="muted">Proposal history is unavailable; this does not mean there are no proposals.</p>
+          ) : proposals.length ? (
+            <>
+              <ul className="recent-proposal-list">
+                {proposals.slice(0, 3).map((proposal) => (
+                  <li key={proposal.id}>
+                    <strong>{proposal.title}</strong>
+                    <small>{proposal.workflow_status === 'completed'
+                      ? 'Analysis completed'
+                      : proposal.workflow_status === 'submitted' && proposal.analyses?.some((item) => !item.accessible)
+                        ? 'Analysis details restricted'
+                        : 'Submitted · analysis pending'}</small>
+                  </li>
+                ))}
+              </ul>
+              <button className="recent-proposals-link" type="button" onClick={onOpenProposals}>Open proposal history</button>
+            </>
+          ) : (
+            <p className="muted">No proposals have been submitted for this company.</p>
           )}
         </section>
       </div>

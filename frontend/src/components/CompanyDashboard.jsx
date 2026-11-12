@@ -22,6 +22,19 @@ const sectionTitles = {
   'ai-assistant': 'AI Assistant',
 };
 
+function sectionStorageKey(companyId) {
+  return `nexus.companySection.${companyId}`;
+}
+
+function readInitialSection(companyId) {
+  try {
+    const storedSection = window.sessionStorage.getItem(sectionStorageKey(companyId));
+    return sectionTitles[storedSection] ? storedSection : 'overview';
+  } catch {
+    return 'overview';
+  }
+}
+
 function emptyData() {
   return {
     company: null,
@@ -35,13 +48,14 @@ function emptyData() {
     internalSourcesError: '',
     knowledgeItems: null,
     researchStats: null,
+    proposals: null,
     errors: [],
   };
 }
 
 export default function CompanyDashboard({ company: initialCompany, onBack }) {
   const [company, setCompany] = useState(initialCompany);
-  const [activeSection, setActiveSection] = useState('overview');
+  const [activeSection, setActiveSection] = useState(() => readInitialSection(initialCompany.id));
   const [data, setData] = useState(emptyData);
   const [loading, setLoading] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -51,6 +65,16 @@ export default function CompanyDashboard({ company: initialCompany, onBack }) {
   const [actionMessage, setActionMessage] = useState('');
 
   const refresh = useCallback(() => setRefreshKey((value) => value + 1), []);
+
+  function navigateToSection(section) {
+    if (!sectionTitles[section]) return;
+    try {
+      window.sessionStorage.setItem(sectionStorageKey(initialCompany.id), section);
+    } catch {
+      // Section navigation remains usable when session storage is unavailable.
+    }
+    setActiveSection(section);
+  }
 
   useEffect(() => {
     let active = true;
@@ -68,6 +92,7 @@ export default function CompanyDashboard({ company: initialCompany, onBack }) {
       ['internalSources', api.companyInternalSources],
       ['knowledgeItems', (id) => api.companyKnowledgeItems(id, '', includeInternalInViews)],
       ['researchStats', api.companyResearchStats],
+      ['proposals', api.companyProposals],
     ];
 
     Promise.allSettled(requests.map(([, request]) => request(initialCompany.id)))
@@ -190,7 +215,7 @@ export default function CompanyDashboard({ company: initialCompany, onBack }) {
 
   return (
     <div className="company-dashboard">
-      <CompanySidebar onNavigate={setActiveSection} />
+      <CompanySidebar activeSection={activeSection} onNavigate={navigateToSection} />
       <main className="dashboard-main">
         <header className="dashboard-topbar">
           <button className="back-button" type="button" onClick={onBack}>
@@ -224,6 +249,7 @@ export default function CompanyDashboard({ company: initialCompany, onBack }) {
                 actionBusy={actionBusy}
                 actionMessage={actionMessage}
                 onSubmitFeedback={submitFeedback}
+                onOpenProposals={() => navigateToSection('proposals')}
                 onImportInternal={importInternalSource}
                 onProcessInternal={() => runProcess(true)}
                 includeInternalInViews={includeInternalInViews}
@@ -262,9 +288,9 @@ export default function CompanyDashboard({ company: initialCompany, onBack }) {
           )}
           {activeSection === 'proposals' && <ProposalAnalysis company={company} />}
           {activeSection === 'ai-assistant' && <AIAssistant company={company} />}
-          {data.errors.length > 0 && activeSection !== 'overview' && (
-            <p className="dashboard-load-warning" role="status">
-              Some company data could not be loaded: {data.errors.join('; ')}
+          {data.errors.length > 0 && (
+            <p className="dashboard-load-warning" role="alert">
+              Some company data could not be loaded. Unavailable data is not an empty result: {data.errors.join('; ')}
             </p>
           )}
         </section>

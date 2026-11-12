@@ -89,5 +89,8 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(payload),
   }),
+  companyProposals: (companyId) => request(
+    `/api/proposals/company/${encodeURIComponent(companyId)}`,
+  ),
   getProposalAnalysis: (analysisId) => request(`/api/proposals/${encodeURIComponent(analysisId)}`),
 };
