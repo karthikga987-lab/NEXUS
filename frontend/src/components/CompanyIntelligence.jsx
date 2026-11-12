@@ -292,6 +292,10 @@ export default function CompanyIntelligence({
   const sourceById = new Map((sources || []).map((source) => [source.id, source]));
   const feedbackRecords = uniqueFeedback(data.feedback);
   const processingCounts = data.ingestion?.processing_status_counts || {};
+  const processedCount = processingCounts.processed ?? processingCounts.completed ?? 0;
+  const failedCount = processingCounts.failed ?? 0;
+  const pendingCount = (processingCounts.pending ?? 0) + (processingCounts.collected ?? 0);
+  const skippedCount = processingCounts.skipped ?? 0;
   const hasProcessingCounts = data.ingestion?.processing_status_counts;
   const graph = data.graph;
   const graphNodes = graph?.nodes || [];
@@ -358,9 +362,9 @@ export default function CompanyIntelligence({
             <span className="processing-state"><LoaderCircle size={15} className="spin" /> Loading status</span>
           ) : hasProcessingCounts ? (
             <div className="processing-counts">
-              <span>{processingCounts.processed || 0} processed</span>
-              <span>{processingCounts.failed || 0} failed</span>
-              <span>{(processingCounts.pending || 0) + (processingCounts.collected || 0)} pending</span>
+              <span>{processedCount} processed</span>
+              <span>{failedCount} failed</span>
+              <span>{pendingCount} pending</span>
             </div>
           ) : (
             <span className="processing-state">Status unavailable</span>
@@ -637,9 +641,9 @@ export default function CompanyIntelligence({
             {data.ingestion ? (
               <div className="research-status-grid">
                 <span><b>Documents collected</b>{data.ingestion.total_sources ?? sources?.length ?? 'Unavailable'}</span>
-                <span><b>Documents processed</b>{processingCounts.processed || 0}</span>
-                <span><b>Failed documents</b>{processingCounts.failed || 0}</span>
-                <span><b>Skipped documents</b>{processingCounts.skipped || 0}</span>
+                <span><b>Documents processed</b>{processedCount}</span>
+                <span><b>Failed documents</b>{failedCount}</span>
+                <span><b>Skipped documents</b>{skippedCount}</span>
               </div>
             ) : (
               <p className="muted">Processing totals are unavailable.</p>
@@ -658,6 +662,9 @@ export default function CompanyIntelligence({
                 <span><b>Full docs collected</b>{data.researchStats.latest_run.counts.collected ?? 0}</span>
                 <span><b>Discovery snippets</b>{data.researchStats.latest_run.counts.snippets_saved ?? 0}</span>
                 <span><b>Duplicate URLs skipped</b>{data.researchStats.latest_run.counts.skipped_duplicates ?? 0}</span>
+                <span><b>Events extracted</b>{data.researchStats.latest_run.counts.ingestion_events_extracted ?? 0}</span>
+                <span><b>Knowledge items created</b>{data.researchStats.latest_run.counts.ingestion_new_knowledge_items ?? 0}</span>
+                <span><b>Embedding chunks generated</b>{data.researchStats.latest_run.counts.ingestion_embedding_chunks_created ?? 0}</span>
               </div>
             )}
             {data.researchStats?.latest_run?.failure_summary && <p className="unavailable-note">Research note: {data.researchStats.latest_run.failure_summary}</p>}

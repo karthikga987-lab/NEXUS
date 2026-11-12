@@ -4,21 +4,14 @@ import copy
 import threading
 import time
 import re
-from html.parser import HTMLParser
-from urllib.parse import (
-    parse_qs,
-    quote_plus,
-    urlsplit,
-    urlunsplit,
-)
-
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy.orm import Session
 
 from app.intelligence.ingestion import process_company_sources
 from app.models.entities import Company
 from app.research.fetcher import fetch_url
+from app.research.discovery import search_ddgs
 from app.research.persistence import save_source
 from app.research.processor import extract_page
 from app.research.service import collect_company_sources
@@ -26,7 +19,6 @@ from app.research.service import collect_company_sources
 
 logger = logging.getLogger(__name__)
 
-SEARCH_URL = "https://html.duckduckgo.com/html/?q="
 MAX_CANDIDATES = 3
 MAX_PAGES_PER_COMPANY = 3
 DISCOVERY_CACHE_TTL_SECONDS = 3600
@@ -52,84 +44,15 @@ BLOCKED_DOMAINS = {
 }
 
 
-class _SearchParser(HTMLParser):
-    """Extract DuckDuckGo result links and their titles."""
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.results = []
-        self._current = None
-        self._inside_result = False
-
-    def handle_starttag(self, tag, attrs):
-        attributes = dict(attrs)
-
-        if (
-            tag == "a"
-            and "result__a" in attributes.get("class", "")
-        ):
-            self._current = {
-                "url": attributes.get("href", ""),
-                "title_parts": [],
-            }
-            self._inside_result = True
-
-    def handle_data(self, data):
-        if self._inside_result and self._current:
-            self._current["title_parts"].append(data)
-
-    def handle_endtag(self, tag):
-        if tag == "a" and self._inside_result and self._current:
-            title = " ".join(self._current["title_parts"]).strip()
-            self._current["title"] = title
-
-            if self._current["url"] and title:
-                self.results.append(self._current)
-
-            self._current = None
-            self._inside_result = False
-
-
 def _search_web(query: str) -> list[dict]:
-    """Perform a bounded public web search."""
-
-    request = Request(
-        SEARCH_URL + quote_plus(query),
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
-            )
-        },
-    )
-
-    with urlopen(request, timeout=15) as response:
-        html = response.read(2_000_000).decode(
-            "utf-8",
-            errors="replace",
-        )
-
-    parser = _SearchParser()
-    parser.feed(html)
-
+    """Use the shared bounded DDGS client for public search leads."""
     results = []
-
-    for item in parser.results:
-        raw_url = item["url"]
-
-        if raw_url.startswith("//"):
-            raw_url = "https:" + raw_url
-
+    for item in search_ddgs(query, max_results=5):
+        raw_url = item.get("href") or item.get("url")
+        title = item.get("title")
+        if not isinstance(raw_url, str) or not isinstance(title, str):
+            continue
         parsed = urlsplit(raw_url)
-
-        # DuckDuckGo wraps result URLs in a redirect URL.
-        if parsed.hostname and "duckduckgo.com" in parsed.hostname:
-            target = parse_qs(parsed.query).get("uddg", [])
-            if target:
-                raw_url = target[0]
-
-        parsed = urlsplit(raw_url)
-
         if (
             parsed.scheme not in {"http", "https"}
             or not parsed.hostname
@@ -140,9 +63,8 @@ def _search_web(query: str) -> list[dict]:
 
         results.append({
             "url": raw_url,
-            "title": item["title"],
+            "title": title,
         })
-
     return results
 
 
@@ -248,6 +170,7 @@ def discover_and_ingest_competitors(
     proposal_company: Company,
     proposal_title: str,
     proposal_description: str,
+    query_generator=None,
 ) -> dict:
     """
     Discover relevant public companies and ingest their public pages.
@@ -346,15 +269,49 @@ def discover_and_ingest_competitors(
         if cached:
             _DISCOVERY_CACHE.pop(cache_key, None)
 
-    try:
-        search_results = _search_web(query)
+    queries = []
+    if query_generator is not None:
+        try:
+            generated = query_generator(
+                proposal_company.name,
+                proposal_title,
+                proposal_description or "",
+            )
+            if isinstance(generated, list):
+                queries = list(dict.fromkeys(
+                    " ".join(value.split())
+                    for value in generated
+                    if isinstance(value, str) and value.strip() and len(value) <= 200
+                ))[:3]
+        except Exception as exc:
+            logger.warning(
+                "AI proposal-query generation failed; using keyword fallback (%s).",
+                type(exc).__name__,
+            )
+    if not queries:
+        queries = [query]
+    summary["search_query"] = " | ".join(queries)
 
-    except Exception as exc:
-        logger.exception("External company search failed")
+    search_results = []
+    failed_queries = 0
+    for query_index, search_query in enumerate(queries, start=1):
+        try:
+            search_results.extend(_search_web(search_query) or [])
+        except Exception as exc:
+            failed_queries += 1
+            logger.warning(
+                "External search query %d failed safely (%s).",
+                query_index,
+                type(exc).__name__,
+            )
+            summary["errors"].append(
+                f"Public search query {query_index} unavailable."
+            )
+        if len(search_results) >= MAX_CANDIDATES * 3:
+            break
+
+    if not search_results and failed_queries:
         summary["status"] = "search_failed"
-        summary["errors"].append(
-            f"Public web search failed: {str(exc)[:250]}"
-        )
         return summary
 
     proposing_domain = (

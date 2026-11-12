@@ -18,6 +18,7 @@ NEGATIVE_WORDS = {
     "unreliable", "failure", "error", "unstable",
     "lag", "stop", "issue", "annoying",
     "disappointing", "poorly",
+    "leak",
 }
 
 WORD_NORMALIZATION = {
@@ -43,6 +44,9 @@ WORD_NORMALIZATION = {
     "subscriptions": "subscription",
     "improvements": "improvement",
     "searches": "search",
+    "leaks": "leak",
+    "leaking": "leak",
+    "leaked": "leak",
 }
 
 TOPIC_KEYWORDS = {
@@ -79,7 +83,7 @@ TOPIC_KEYWORDS = {
     "reliability": {
         "broken", "error", "bug", "failure",
         "crash", "unstable", "reliable",
-        "unreliable", "issue",
+        "unreliable", "issue", "leak",
     },
 }
 

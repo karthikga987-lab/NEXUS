@@ -27,6 +27,13 @@ _STOP_WORDS = {
 _MIN_TERM_LENGTH = 3
 
 _ALLOWED_QWEN_CATEGORIES = {
+    "directly_relevant",
+    "same_company_historical",
+    "competitor_context",
+    "general_industry_context",
+    "related_insufficient",
+    "irrelevant",
+    # Retain compatibility with earlier classifier prompts and test doubles.
     "direct_match",
     "contextual",
     "unrelated",
@@ -104,14 +111,18 @@ def _make_enriched_passage(
     category: str,
     reason: str,
     method: str,
+    proposal_aspect: str | None = None,
 ) -> dict[str, Any]:
     """Return a copy with explicit proposal relevance metadata."""
-    return {
+    enriched = {
         **item,
         "proposal_relevance": category,
         "proposal_relevance_reason": reason,
         "proposal_relevance_method": method,
     }
+    if proposal_aspect:
+        enriched["proposal_aspect"] = proposal_aspect
+    return enriched
 
 
 def _classify_batch_with_qwen(
@@ -148,6 +159,7 @@ def _classify_batch_with_qwen(
         index = entry.get("index")
         category = entry.get("category")
         reason = entry.get("reason")
+        proposal_aspect = entry.get("proposal_aspect")
 
         if not isinstance(index, int) or isinstance(index, bool):
             raise ValueError("Qwen returned an invalid passage index.")
@@ -163,10 +175,24 @@ def _classify_batch_with_qwen(
 
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("Qwen returned an empty relevance explanation.")
+        if proposal_aspect is None and category in {
+            "directly_relevant",
+            "same_company_historical",
+            "competitor_context",
+            "general_industry_context",
+            "related_insufficient",
+            "irrelevant",
+        }:
+            raise ValueError("Qwen omitted the proposal aspect.")
+        if proposal_aspect is None:
+            proposal_aspect = "unspecified"
+        if not isinstance(proposal_aspect, str) or not proposal_aspect.strip():
+            raise ValueError("Qwen returned an invalid proposal aspect.")
 
         validated_by_index[index] = {
             "category": category,
             "reason": reason.strip()[:500],
+            "proposal_aspect": proposal_aspect.strip()[:160],
         }
 
     if set(validated_by_index) != set(range(len(passages))):
@@ -189,11 +215,11 @@ def filter_external_passages(
     Filter external passages against the proposal.
 
     When a Qwen classifier is supplied:
-    - direct_match: accepted as potentially relevant evidence.
-    - contextual: excluded from claim-supporting evidence.
-    - unrelated: excluded.
-    - insufficient_information: excluded.
-    - classification failure: the entire affected batch is excluded.
+    - directly_relevant, competitor_context and industry context are retained
+      with their classifications and source provenance.
+    - related_insufficient, irrelevant, and same_company_historical labels
+      from this external-only pool are excluded.
+    - classification failure: the affected batch is excluded.
 
     When no classifier is supplied, the legacy lexical filter is used.
 
@@ -284,9 +310,15 @@ def filter_external_passages(
                 category=result["category"],
                 reason=result["reason"],
                 method="qwen",
+                proposal_aspect=result["proposal_aspect"],
             )
 
-            if result["category"] == "direct_match":
+            if result["category"] in {
+                "directly_relevant",
+                "competitor_context",
+                "general_industry_context",
+                "direct_match",
+            }:
                 accepted.append(enriched)
             else:
                 excluded.append(enriched)

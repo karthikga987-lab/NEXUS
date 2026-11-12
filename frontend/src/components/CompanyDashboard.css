@@ -282,6 +282,8 @@
 .proposal-evidence-card blockquote,
 .proposal-claim p,
 .ai-verified-claim blockquote { margin: 10px 0; color: #d1d8ed; line-height: 1.6; overflow-wrap: anywhere; }
+.proposal-relevance-label { margin: 8px 0 4px; color: #c9b5f4; font-size: 12px; font-weight: 600; }
+.proposal-relevance-note { margin: 4px 0 8px; color: #aeb9d3; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .proposal-analysis-result li { margin: 7px 0; color: #d1d8ed; }
 .ai-citations,
 .ai-verified-claim > div { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }

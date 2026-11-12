@@ -5,6 +5,7 @@ from app.intelligence.proposal_relevance import (
     classify_external_passage_relevance,
     filter_external_passages,
 )
+from app.intelligence import proposal_analysis
 
 
 def test_relevant_haircare_passage_is_direct_match():
@@ -233,6 +234,98 @@ def test_qwen_filter_preserves_source_metadata_without_mutation():
     assert accepted[0]["proposal_relevance_method"] == "qwen"
 
     assert "proposal_relevance" not in original
+
+
+def test_gorilla_bottle_is_competitor_context_for_milton_proposal(monkeypatch):
+    passage = {
+        "source_id": "synthetic-gorilla-source-1",
+        "source_url": "https://example.test/synthetic/gorilla-bottle",
+        "source_title": "Synthetic fixture: Gorilla Wear bottle",
+        "source_company_name": "Gorilla Wear",
+        "chunk_text": (
+            "Synthetic fixture, not a real-company claim: Gorilla Wear's "
+            "insulated bottle has a temperature display."
+        ),
+        "similarity": 0.94,
+    }
+    captured = {}
+
+    def fake_qwen(system_prompt, user_message, **kwargs):
+        captured["prompt"] = system_prompt
+        captured["payload"] = user_message
+        return {
+            "classifications": [{
+                "index": 0,
+                "category": "competitor_context",
+                "proposal_aspect": "smart temperature display",
+                "reason": (
+                    "The synthetic passage attributes this feature to "
+                    "Gorilla Wear, so it is comparator context rather than "
+                    "evidence about Milton."
+                ),
+            }]
+        }
+
+    monkeypatch.setattr(proposal_analysis, "_call_ollama_json", fake_qwen)
+
+    def classifier(title, description, passages):
+        return proposal_analysis._classify_external_passages_with_qwen(
+            title,
+            description,
+            passages,
+            proposing_company_name="Milton",
+        )
+
+    accepted, excluded = filter_external_passages(
+        title="Milton ThermoSmart insulated bottle",
+        description="Hypothetical proposal for a bottle with a temperature display.",
+        passages=[passage],
+        classifier=classifier,
+    )
+
+    assert excluded == []
+    assert len(accepted) == 1
+    result = accepted[0]
+    assert result["proposal_relevance"] == "competitor_context"
+    assert result["proposal_aspect"] == "smart temperature display"
+    assert result["source_id"] == "synthetic-gorilla-source-1"
+    assert result["source_url"] == passage["source_url"]
+    assert result["source_company_name"] == "Gorilla Wear"
+    assert '"company": "Milton"' in captured["payload"]
+    assert "Gorilla Wear" in captured["payload"]
+    assert "synthetic-gorilla-source-1" not in captured["payload"]
+    assert passage["source_url"] not in captured["payload"]
+    assert "hair-care" not in captured["prompt"].casefold()
+
+
+def test_proposal_search_query_generation_is_bounded(monkeypatch):
+    captured = {}
+
+    def fake_qwen(prompt, user_message, **kwargs):
+        captured.update(kwargs)
+        captured["user_message"] = user_message
+        return {"queries": [
+            " smart temperature display drinkware ",
+            "consumer demand temperature monitoring bottles",
+            "SMART TEMPERATURE DISPLAY DRINKWARE",
+            "x" * 201,
+            42,
+        ]}
+
+    monkeypatch.setattr(proposal_analysis, "_call_ollama_json", fake_qwen)
+    queries = proposal_analysis.generate_targeted_research_queries(
+        "Milton",
+        "Hypothetical ThermoSmart bottle",
+        "Explore a temperature display for drinkware.",
+    )
+
+    assert queries == [
+        "smart temperature display drinkware",
+        "consumer demand temperature monitoring bottles",
+    ]
+    assert captured["timeout"] == proposal_analysis.RESEARCH_QUERY_TIMEOUT
+    assert captured["response_schema"]["properties"]["queries"]["maxItems"] == 3
+    assert '"company": "Milton"' in captured["user_message"]
 
 
 def test_qwen_filter_excludes_batch_when_classifier_fails():

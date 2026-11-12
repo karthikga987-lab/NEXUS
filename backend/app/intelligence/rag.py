@@ -292,7 +292,7 @@ def _is_noise_sentence(sentence: str) -> bool:
             r"resulted|yielded)\b",
             folded,
         )
-    )
+    ) or _has_reported_participation_metric(folded)
 
     # Reject fragments that are primarily a device/vendor list.
     # Completed event and measured-outcome statements are exempt even when
@@ -323,6 +323,21 @@ def _is_noise_sentence(sentence: str) -> bool:
         return True
 
     return False
+
+
+def _has_reported_participation_metric(sentence: str) -> bool:
+    """Recognize quantified attendance as a reported result, not effectiveness."""
+    return bool(
+        re.search(
+            r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|"
+            r"ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|"
+            r"seventeen|eighteen|nineteen|twenty)\s+"
+            r"(?:[a-z-]+\s+){0,3}"
+            r"(?:people|attendees|participants|users|customers)\b"
+            r".{0,100}\b(?:attend\w*|showed\s+up|participat\w*|joined)\b",
+            sentence.casefold(),
+        )
+    )
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -431,6 +446,7 @@ QUERY_INTENT_TERMS = {
     "reported", "reports",
     "about", "public", "stored", "collected", "available", "did", "does", "do", "using", "which", "who",
     "where", "why", "how", "is", "are", "was", "were",
+    "according", "help", "page", "pages",
     "exact", "calendar", "day", "timing", "geography", "documented",
 }
 
@@ -732,8 +748,9 @@ def _prepare_internal_evidence(
 def _diversify_internal_results(
     results: list[dict[str, Any]],
     limit: int,
+    query: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Prefer one high-ranking passage per source before repeats."""
+    """Prefer source diversity, then keep passages that add requested aspects."""
     selected = []
     deferred = []
     source_counts: dict[str, int] = {}
@@ -749,23 +766,70 @@ def _diversify_internal_results(
             continue
         seen_chunks.add(chunk_key)
         if source_counts.get(source_id, 0) < 1:
-            selected.append(item)
-            source_counts[source_id] = 1
-            if len(selected) == limit:
-                return selected
+            if len(selected) < limit:
+                selected.append(item)
+                source_counts[source_id] = 1
+            else:
+                deferred.append(item)
         else:
             deferred.append(item)
 
-    # Allow a second passage from a source only after every distinct source
-    # has had a chance to contribute. This avoids one long page dominating.
+    # Allow repeated passages only after every distinct source has had a
+    # chance to contribute. For multi-part questions, prefer a deferred
+    # passage that supplies an aspect not already covered by selected text.
+    requested_aspects = _requested_answer_aspects(query) if query else set()
+    def passage_aspects(item: dict[str, Any]) -> set[str]:
+        return {
+            aspect
+            for aspect in requested_aspects
+            if any(
+                _claim_covers_aspect(sentence, aspect)
+                for sentence in _split_sentences(item.get("chunk_text") or "")
+            )
+        }
+
+    def covered_aspects(items: list[dict[str, Any]]) -> set[str]:
+        return set().union(*(passage_aspects(item) for item in items)) if items else set()
+
+    if requested_aspects:
+        covered = covered_aspects(selected)
+        deferred.sort(
+            key=lambda item: sum(
+                1
+                for aspect in requested_aspects - covered
+                if aspect in passage_aspects(item)
+            ),
+            reverse=True,
+        )
+
     for item in deferred:
         source_id = item["source_id"]
         if source_counts.get(source_id, 0) >= 2:
             continue
-        selected.append(item)
+        if len(selected) < limit:
+            selected.append(item)
+            source_counts[source_id] = source_counts.get(source_id, 0) + 1
+            continue
+
+        missing_aspects = requested_aspects - covered_aspects(selected)
+        if not missing_aspects or not (passage_aspects(item) & missing_aspects):
+            continue
+
+        without_aspects = [
+            index
+            for index, selected_item in enumerate(selected)
+            if not passage_aspects(selected_item)
+        ]
+        replacement_candidates = without_aspects or list(range(len(selected)))
+        replace_index = min(
+            replacement_candidates,
+            key=lambda index: float(selected[index].get("similarity") or 0.0),
+        )
+        replaced = selected[replace_index]
+        old_source_id = replaced["source_id"]
+        source_counts[old_source_id] = source_counts.get(old_source_id, 1) - 1
+        selected[replace_index] = item
         source_counts[source_id] = source_counts.get(source_id, 0) + 1
-        if len(selected) == limit:
-            break
     return selected
 
 
@@ -777,9 +841,11 @@ def _filter_internal_candidates_by_focus(
     """Discard semantically similar passages with no lexical topic anchor.
 
     Intent words such as "launch" or "reason" are excluded from the focus
-    vocabulary. A product-specific question therefore needs at least one
-    product/topic term in the passage or its source title before it can enter
-    answer generation.
+    vocabulary. A product-specific question therefore needs a topic anchor
+    before a source can enter answer generation. Once a source is anchored,
+    retain a lower-overlap passage from that same source when it contains a
+    requested answer aspect; this keeps multi-part answers from losing a
+    result or rationale in the next passage of an otherwise relevant source.
     """
     focus = _query_focus_terms(query, company_name)
     if not focus:
@@ -803,25 +869,69 @@ def _filter_internal_candidates_by_focus(
             )
         ]
 
-    ranked = []
+    required_matches = 1 if len(focus) == 1 else max(
+        2,
+        (len(focus) + 1) // 2,
+    )
+    requested_aspects = _requested_answer_aspects(query)
+    phrase = _query_focus_phrase(query, company_name)
+    scored = []
+    anchored_source_ids = set()
+
     for index, item in enumerate(results):
         passage_tokens = _tokens(item.get("chunk_text") or "")
         title_tokens = _tokens(item.get("source_title") or "")
         matching_terms = focus.intersection(passage_tokens | title_tokens)
-        phrase = _query_focus_phrase(query, company_name)
         phrase_match = _contains_phrase(
             f"{item.get('source_title') or ''} {item.get('chunk_text') or ''}",
             phrase,
         )
-        required_matches = 1 if len(focus) == 1 else max(
-            2,
-            (len(focus) + 1) // 2,
+        has_topic_anchor = (
+            len(matching_terms) >= required_matches or phrase_match
         )
-        if len(matching_terms) < required_matches and not phrase_match:
+        passage_aspects = {
+            aspect
+            for aspect in requested_aspects
+            if any(
+                _claim_covers_aspect(sentence, aspect)
+                for sentence in _split_sentences(item.get("chunk_text") or "")
+            )
+        }
+        source_id = item.get("source_id")
+        if has_topic_anchor and source_id:
+            anchored_source_ids.add(source_id)
+
+        scored.append((
+            index,
+            item,
+            matching_terms,
+            phrase_match,
+            has_topic_anchor,
+            passage_aspects,
+        ))
+
+    ranked = []
+    for (
+        index,
+        item,
+        matching_terms,
+        phrase_match,
+        has_topic_anchor,
+        passage_aspects,
+    ) in scored:
+        source_id = item.get("source_id")
+        if not has_topic_anchor and not (
+            source_id in anchored_source_ids
+            and matching_terms
+            and passage_aspects
+        ):
             continue
+
         relevance = len(matching_terms) / len(focus)
         if phrase_match:
             relevance += 2.0
+        if passage_aspects:
+            relevance += 0.5 + (0.1 * len(passage_aspects))
         try:
             similarity = float(item.get("similarity") or 0.0)
         except (TypeError, ValueError):
@@ -1064,6 +1174,18 @@ def _requested_answer_aspects(query: str) -> set[str]:
         aspects.add("experiment")
     if re.search(r"\b(results?|outcomes?|impacts?|effects?)\b", folded):
         aspects.add("outcome")
+    if re.search(
+        r"\b(compared|comparing|comparison|versus|vs\.?)\b|"
+        r"\bdifference between\b",
+        folded,
+    ):
+        aspects.add("comparison")
+    if re.search(
+        r"\bhow many\b.{0,60}\b(?:people|attendees|participants|users|customers)\b|"
+        r"\bnumber of\b.{0,40}\b(?:people|attendees|participants|users|customers)\b",
+        folded,
+    ):
+        aspects.add("participation")
     if re.search(r"\b(launch|launched|introduc|event|change|decision)\w*\b", folded) or re.search(r"\bwhat product\b", folded):
         aspects.add("event")
     return aspects
@@ -1083,6 +1205,7 @@ def _claim_covers_aspect(statement: str, aspect: str) -> bool:
         event_terms = re.compile(
             r"\b(?:announced|launched|introduced|released|unveiled|"
             r"became available|went on sale|rolled out|discontinued|"
+            r"shut\s+down|shutdown|"
             r"reformulated|redesigned|added|removed|increased|decreased|"
             r"changed)\b"
         )
@@ -1100,6 +1223,16 @@ def _claim_covers_aspect(statement: str, aspect: str) -> bool:
         return bool(re.search(r"\b(because|reasons?|purposes?|aimed|designed|intended|in order to|to improve|to help|to simplify|to address)\b", folded))
     if aspect == "experiment":
         return bool(re.search(r"\b(experiment|trial|a/b test|tested|testing)\b", folded))
+    if aspect == "comparison":
+        return bool(
+            re.search(
+                r"\bcompar\w*\b.{0,100}\b(?:with|to|against|versus|vs\.?)\b|"
+                r"\b(?:versus|vs\.?)\b",
+                folded,
+            )
+        )
+    if aspect == "participation":
+        return _has_reported_participation_metric(folded)
     if aspect == "outcome":
         reports_absence = bool(
             re.search(
@@ -1116,6 +1249,7 @@ def _claim_covers_aspect(statement: str, aspect: str) -> bool:
                 folded,
             )
         )
+        participation_metric = _has_reported_participation_metric(folded)
         has_measured_change = bool(
             re.search(
                 r"\b(?:increased|decreased|improved|reduced|rose|fell|grew|"
@@ -1129,7 +1263,7 @@ def _claim_covers_aspect(statement: str, aspect: str) -> bool:
                 folded,
             )
         )
-        return reports_absence or has_measured_change
+        return reports_absence or has_measured_change or participation_metric
     if aspect == "event":
         return bool(re.search(r"\b(launch\w*|introduc\w*|experiment|trial|releas\w*|updat\w*|chang\w*|removed|discontinued|decision|acquired|partnered|rolled out|announced)\b", folded))
     return False
@@ -1210,6 +1344,7 @@ def answer_with_evidence(
         internal_results = _diversify_internal_results(
             internal_candidates,
             limit,
+            query=query,
         )
 
         internal_evidence = _prepare_internal_evidence(

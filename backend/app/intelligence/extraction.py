@@ -38,7 +38,10 @@ EVENT_TYPES = {
     "other",
 }
 
-EVENT_EXTRACTION_OUTPUT_BUDGETS = (2048, 4096)
+EVENT_EXTRACTION_OUTPUT_BUDGETS = (2048, 4096, 8192)
+EVENT_EXTRACTION_LONG_SOURCE_CHARACTERS = 8000
+EVENT_EXTRACTION_LONG_SOURCE_OUTPUT_BUDGETS = (8192, 12288)
+MAX_KNOWLEDGE_ITEMS_PER_SOURCE = 4
 
 KNOWLEDGE_ITEM_TYPES = {
     "proposal",
@@ -146,7 +149,8 @@ class _StructuredExtraction(BaseModel):
 
     events: list[_StructuredEvent]
     knowledge_items: list[_StructuredKnowledgeItem] = Field(
-        default_factory=list
+        default_factory=list,
+        max_length=MAX_KNOWLEDGE_ITEMS_PER_SOURCE,
     )
 
 
@@ -219,6 +223,7 @@ EVENT_RESPONSE_SCHEMA = {
         },
         "knowledge_items": {
             "type": "array",
+            "maxItems": MAX_KNOWLEDGE_ITEMS_PER_SOURCE,
             "items": {
                 "type": "object",
                 "properties": {
@@ -488,6 +493,11 @@ not duplicate an event as a knowledge item. Keep proposals separate from
 approved decisions and completed outcomes. Use status "unknown" when the
 source does not explicitly establish status. Use null for missing actor,
 subject, and dates. Every item needs an exact quotation from the source.
+Return no more than four distinct, high-value knowledge items per source.
+Prefer one concise exact sentence as each evidence quote and keep each item
+description to one short sentence. Do not split a single fact into multiple
+items. Ignore details about other organizations unless the source explicitly
+attributes the information to the company being researched.
 Allowed evidence_classification values are documented, supported,
 correlation, inference, and unknown. Prefer documented for a direct source
 statement; do not treat this as independent proof that the statement is true.
@@ -574,8 +584,13 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
     }
 
     last_error: Exception | None = None
+    output_budgets = (
+        EVENT_EXTRACTION_LONG_SOURCE_OUTPUT_BUDGETS
+        if len(source_text) > EVENT_EXTRACTION_LONG_SOURCE_CHARACTERS
+        else EVENT_EXTRACTION_OUTPUT_BUDGETS
+    )
 
-    for attempt, output_budget in enumerate(EVENT_EXTRACTION_OUTPUT_BUDGETS):
+    for attempt, output_budget in enumerate(output_budgets):
         request_payload = dict(payload)
         request_payload["options"] = {
             **payload["options"],
@@ -635,7 +650,7 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
                 f"Ollama returned HTTP {exc.code} during event extraction."
             )
             if (
-                attempt < len(EVENT_EXTRACTION_OUTPUT_BUDGETS) - 1
+                attempt < len(output_budgets) - 1
                 and exc.code in {500, 502, 503, 504}
             ):
                 logger.warning(
@@ -649,11 +664,11 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
 
         except urllib.error.URLError as exc:
             last_error = ExtractionError("Could not connect to Ollama.")
-            if attempt < len(EVENT_EXTRACTION_OUTPUT_BUDGETS) - 1:
+            if attempt < len(output_budgets) - 1:
                 logger.warning(
                     "Ollama connection failed during event extraction; "
                     "retrying with output budget %s: %s",
-                    EVENT_EXTRACTION_OUTPUT_BUDGETS[attempt + 1],
+                    output_budgets[attempt + 1],
                     exc,
                 )
                 time.sleep(2)
@@ -673,12 +688,12 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
                     "Ollama returned an invalid extraction response."
                 )
             )
-            if attempt < len(EVENT_EXTRACTION_OUTPUT_BUDGETS) - 1:
+            if attempt < len(output_budgets) - 1:
                 logger.warning(
                 "Invalid event-extraction response; retrying with "
                     "num_predict=%s "
                     "(done_reason=%s, response_chars=%s): %s",
-                    EVENT_EXTRACTION_OUTPUT_BUDGETS[attempt + 1],
+                    output_budgets[attempt + 1],
                     done_reason,
                     content_length,
                     last_error,

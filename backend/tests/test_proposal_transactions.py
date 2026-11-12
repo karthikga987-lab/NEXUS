@@ -107,6 +107,7 @@ def test_competitor_rollback_does_not_remove_submitted_proposal(
             proposal_company,
             proposal_title,
             proposal_description,
+            query_generator=None,
         ):
             # The proposal must already be committed and visible
             # from the independent competitor research session.

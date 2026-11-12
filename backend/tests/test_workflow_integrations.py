@@ -143,6 +143,116 @@ def test_semantic_retrieval_rag_reports_unanswered_aspect(db, monkeypatch):
     assert "result" in answer["answer"].casefold() or "outcome" in answer["answer"].casefold()
 
 
+def test_rag_retrieves_verified_shutdown_date_from_help_page(db, monkeypatch):
+    session, _ = db
+    company = create_company(session)
+    passage = (
+        "SYNTHETIC TEST FIXTURE. The Acme service shut down on January 18, 2023."
+    )
+    source = SourceDocument(
+        company_id=company.id,
+        url="https://acme.example/help/synthetic-shutdown",
+        title="Synthetic Acme Help page shutdown information",
+        content_text=passage,
+        permission_status="public",
+        source_type="official_blog",
+        collected_at=datetime.now(timezone.utc),
+    )
+    session.add(source)
+    session.flush()
+    session.add(DocumentEmbedding(
+        source_id=source.id,
+        chunk_index=0,
+        chunk_text=passage,
+        embedding=[1.0] + [0.0] * 767,
+        model_name=embeddings.EMBEDDING_MODEL,
+    ))
+    session.commit()
+    monkeypatch.setattr(
+        embeddings,
+        "generate_embeddings",
+        lambda texts: [[1.0] + [0.0] * 767 for _ in texts],
+    )
+
+    answer = answer_with_evidence(
+        session,
+        company.id,
+        "What date did Synthetic Acme shut down according to the Acme Help page?",
+    )
+
+    assert answer["answer_status"] == "answered_with_verified_evidence", answer
+    assert {row["aspect"]: row["status"] for row in answer["requested_aspects"]} == {
+        "date": "supported",
+    }
+    claim = next(
+        claim for claim in answer["verified_claims"]
+        if "shut down" in claim["statement"].casefold()
+    )
+    expected_claim = "The Acme service shut down on January 18, 2023."
+    assert claim["statement"] == expected_claim
+    assert claim["citations"][0]["source_id"] == str(source.id)
+    assert claim["citations"][0]["source_url"] == source.url
+    assert claim["citations"][0]["supporting_quote"] == expected_claim
+
+
+def test_semantic_retrieval_rag_covers_each_requested_experiment_fact(db, monkeypatch):
+    session, _ = db
+    company = create_company(session)
+    passage = (
+        "In a clearly labelled synthetic experiment, the team compared the "
+        "original PulseBoard dashboard with a redesigned dashboard. "
+        "The report stated that 40 fictional pilot users participated in the "
+        "two-week test. "
+        "The measured task completion time fell from 90 seconds to 55 seconds."
+    )
+    source = SourceDocument(
+        company_id=company.id,
+        url="https://acme.example/synthetic/pulseboard-test",
+        title="Synthetic PulseBoard experiment report",
+        content_text=passage,
+        permission_status="public",
+        source_type="press_release",
+        collected_at=datetime.now(timezone.utc),
+    )
+    session.add(source)
+    session.flush()
+    session.add(DocumentEmbedding(
+        source_id=source.id,
+        chunk_index=0,
+        chunk_text=passage,
+        embedding=[1.0] + [0.0] * 767,
+        model_name=embeddings.EMBEDDING_MODEL,
+    ))
+    session.commit()
+    monkeypatch.setattr(
+        embeddings,
+        "generate_embeddings",
+        lambda texts: [[1.0] + [0.0] * 767 for _ in texts],
+    )
+
+    answer = answer_with_evidence(
+        session,
+        company.id,
+        "Which PulseBoard dashboard versions were compared, how many users "
+        "participated, and what measured outcome was reported?",
+    )
+
+    aspect_states = {
+        row["aspect"]: row["status"] for row in answer["requested_aspects"]
+    }
+    assert aspect_states == {
+        "comparison": "supported",
+        "outcome": "supported",
+        "participation": "supported",
+    }, answer
+    assert answer["answer_status"] == "answered_with_verified_evidence"
+    assert answer["verified_claims"]
+    assert all(claim["citations"] for claim in answer["verified_claims"])
+    assert "original pulseboard dashboard" in answer["answer"].casefold()
+    assert "40 fictional pilot users" in answer["answer"].casefold()
+    assert "90 seconds to 55 seconds" in answer["answer"].casefold()
+
+
 def test_semantic_retrieval_does_not_treat_result_label_as_outcome(db, monkeypatch):
     session, _ = db
     company = create_company(session)
@@ -407,6 +517,13 @@ def test_feedback_classifier_generic_topic_and_heuristic_limits():
     # terms remains neutral rather than receiving model-inferred polarity.
     assert analyze_feedback("It works as expected.")["sentiment"] == "neutral"
 
+    leaking_cap = analyze_feedback(
+        "[SYNTHETIC TEST] The bottle cap leaks after use."
+    )
+    assert leaking_cap["sentiment"] == "negative"
+    assert "reliability" in leaking_cap["topics"]
+    assert leaking_cap["feedback_type"] == "complaint"
+
 
 def test_research_and_ingestion_http_workflow_uses_shared_company_records(
     tmp_path,
@@ -484,7 +601,10 @@ def test_research_and_ingestion_http_workflow_uses_shared_company_records(
             )
             assert research_response.status_code == 200, research_response.text
             research = research_response.json()
-            assert research["counts"]["created"] == 1
+            # Company creation already ran the bounded onboarding workflow.
+            # A manual research retry must reuse the existing source safely.
+            assert research["counts"]["created"] == 0
+            assert research["counts"]["updated_or_unchanged"] == 1
             source_id = research["results"][0]["source_id"]
 
             processing_response = client.post(
@@ -492,7 +612,7 @@ def test_research_and_ingestion_http_workflow_uses_shared_company_records(
                 json={"source_ids": [source_id]},
             )
             assert processing_response.status_code == 200, processing_response.text
-            assert processing_response.json()["counts"]["processed"] == 1
+            assert processing_response.json()["counts"]["skipped"] == 1
 
             sources = client.get(f"/api/companies/{company_id}/sources")
             events = client.get(f"/api/companies/{company_id}/events")

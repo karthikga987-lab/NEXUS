@@ -103,6 +103,35 @@ export default function CompanyDashboard({ company: initialCompany, onBack }) {
     setActionMessage('');
   }, [initialCompany.id]);
 
+  useEffect(() => {
+    const status = data.researchStats?.research_status;
+    if (status !== 'queued' && status !== 'running') return undefined;
+
+    let active = true;
+    const poll = async () => {
+      const [researchResult, ingestionResult] = await Promise.allSettled([
+        api.companyResearchStats(initialCompany.id),
+        api.companyIngestionStatus(initialCompany.id),
+      ]);
+      if (!active) return;
+      setData((current) => {
+        const next = { ...current };
+        if (researchResult.status === 'fulfilled') next.researchStats = researchResult.value;
+        if (ingestionResult.status === 'fulfilled') next.ingestion = ingestionResult.value;
+        return next;
+      });
+      const becameTerminal = researchResult.status === 'fulfilled'
+        && !['queued', 'running'].includes(researchResult.value.research_status);
+      if (becameTerminal) refresh();
+    };
+
+    const timer = window.setInterval(poll, 2500);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [data.researchStats?.research_status, initialCompany.id, refresh]);
+
   async function runAction(kind, message, operation, formatResult) {
     setActionBusy(kind);
     setActionMessage(message);

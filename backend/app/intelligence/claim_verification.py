@@ -61,10 +61,13 @@ For EACH request:
 2. Determine whether the passage supports the COMPLETE factual meaning
    of the claim.
 3. Company context may clarify attribution, but cannot prove an event.
-3a. The claim and supporting quotation must describe the SAME subject.
-3b. A statement about a company's platform does not prove a statement about a specific model. A statement about a partnership does not prove that a specific product was used or adopted. A statement about a company does not automatically prove a statement about its product.
-3c. Never transfer actions such as adoption, deployment, integration, launch or use between a company, platform, partner and model.
-3d. Related products appearing in the same passage is not sufficient evidence. Reject the claim unless the quoted passage directly connects the named subject to the claimed action or property.
+3a. First distinguish direct, partial, indirect, contradictory, and absent
+    support. Only direct support for the complete claim may be returned as
+    supported=true. Reject partial, indirect, contradictory, or absent support.
+3b. The claim and supporting quotation must describe the SAME subject.
+3c. A statement about a company's platform does not prove a statement about a specific model. A statement about a partnership does not prove that a specific product was used or adopted. A statement about a company does not automatically prove a statement about its product.
+3d. Never transfer actions such as adoption, deployment, integration, launch or use between a company, platform, partner and model.
+3e. Related products appearing in the same passage is not sufficient evidence. Reject the claim unless the quoted passage directly connects the named subject to the claimed action or property.
 4. Reject unsupported dates, numbers, prices, counts and qualifiers.
 5. Preserve material qualifiers such as approximately, planned,
    expected, more than, at least, selected and eligible. Reject a claim

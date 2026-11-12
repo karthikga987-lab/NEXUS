@@ -29,6 +29,7 @@ from app.intelligence.knowledge_retrieval import append_relevant_knowledge_item_
 from app.intelligence.proposal_analysis import (
     ProposalAnalysisError,
     analyze_proposal_with_evidence,
+    generate_targeted_research_queries,
 )
 
 from app.research.competitors import discover_and_ingest_competitors
@@ -260,7 +261,25 @@ def _format_evidence(
         "permission_status": item.get("permission_status"),
         "evidence_classification": "unknown",
         "evidence_origin": item.get("evidence_origin"),
+        **{
+            key: item.get(key)
+            for key in (
+                "proposal_relevance",
+                "proposal_relevance_reason",
+                "proposal_aspect",
+            )
+            if item.get(key) is not None
+        },
     }
+
+
+def _saved_analysis_source_scope(source: SourceDocument, proposal: Proposal) -> str:
+    """Classify persisted public citations by provenance, not ownership alone."""
+    if source.permission_status != "public":
+        return "unknown"
+    if source.company_id == proposal.company_id:
+        return "public_company"
+    return "external"
 
 
 def _extract_feedback_keywords(text: str) -> set[str]:
@@ -439,6 +458,7 @@ def analyze_proposal(
                     proposal_company=competitor_company,
                     proposal_title=payload.title,
                     proposal_description=payload.description,
+                    query_generator=generate_targeted_research_queries,
                 )
                 external_research["requested"] = True
             except Exception as exc:
@@ -611,6 +631,21 @@ def analyze_proposal(
             analysis_result,
             "external_public",
         )
+        relevance_by_source_id = {
+            item.get("source_id"): {
+                key: item.get(key)
+                for key in (
+                    "proposal_relevance",
+                    "proposal_relevance_reason",
+                    "proposal_aspect",
+                )
+                if item.get(key) is not None
+            }
+            for item in analysis_result.get("evidence_sources", [])
+            if isinstance(item, dict) and item.get("source_id")
+        }
+        for item in external_evidence:
+            item.update(relevance_by_source_id.get(item.get("source_id"), {}))
 
         # EVIDENCE GUARD:
         # No validated documentary sources means the model's
@@ -926,15 +961,7 @@ def get_proposal_analysis(
         if source.id not in claim["source_ids"]:
             claim["source_ids"].append(source.id)
 
-            scope = (
-                "internal"
-                if source.company_id == proposal.company_id
-                else (
-                    "external"
-                    if source.permission_status == "public"
-                    else "unknown"
-                )
-            )
+            scope = _saved_analysis_source_scope(source, proposal)
 
             claim["sources"].append({
                 "source_id": source.id,
@@ -953,11 +980,11 @@ def get_proposal_analysis(
             for source in claim["sources"]
         }
 
-        if scopes == {"internal"}:
-            claim["evidence_scope"] = "internal"
+        if scopes == {"public_company"}:
+            claim["evidence_scope"] = "public_company"
         elif scopes == {"external"}:
             claim["evidence_scope"] = "external"
-        elif scopes == {"internal", "external"}:
+        elif scopes == {"public_company", "external"}:
             claim["evidence_scope"] = "mixed"
 
     saved_claims = list(claims_by_statement.values())

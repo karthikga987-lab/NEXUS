@@ -136,6 +136,65 @@ def test_search_query_uses_proposal_title_and_description(monkeypatch):
     assert "nexus" not in query
 
 
+def test_search_uses_shared_ddgs_results_and_rejects_unsafe_links(monkeypatch):
+    monkeypatch.setattr(
+        competitors,
+        "search_ddgs",
+        lambda query, max_results: [
+            {"href": "https://bottle.example/product", "title": "Bottle"},
+            {"href": "javascript:alert(1)", "title": "Unsafe"},
+            {"href": "file:///secret", "title": "Local"},
+        ],
+    )
+
+    assert competitors._search_web("synthetic bottle query") == [{
+        "url": "https://bottle.example/product",
+        "title": "Bottle",
+    }]
+
+
+def test_ai_search_queries_are_bounded_and_search_failures_are_safe(monkeypatch):
+    captured = []
+    real_search_web = competitors._search_web
+    monkeypatch.setattr(
+        competitors,
+        "_search_web",
+        lambda query: (captured.append(query) or []),
+    )
+    result = competitors.discover_and_ingest_competitors(
+        db=None,
+        proposal_company=make_proposal_company(),
+        proposal_title="ThermoSmart bottle",
+        proposal_description="Hypothetical temperature display.",
+        query_generator=lambda *args: ["query one", "query two", "query three", "query four"],
+    )
+    assert captured == ["query one", "query two", "query three"]
+    assert result["status"] == "completed"
+    assert result["search_query"] == "query one | query two | query three"
+
+    monkeypatch.setattr(
+        competitors,
+        "search_ddgs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("DDGS search service unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        competitors,
+        "_search_web",
+        real_search_web,
+    )
+    failed = competitors.discover_and_ingest_competitors(
+        db=None,
+        proposal_company=make_proposal_company(),
+        proposal_title="Different bounded test proposal",
+        proposal_description="Hypothetical temperature display.",
+        query_generator=lambda *args: ["one bounded query"],
+    )
+    assert failed["status"] == "search_failed"
+    assert failed["errors"] == ["Public search query 1 unavailable."]
+
+
 def test_own_company_and_blocked_domains_are_excluded(monkeypatch):
     company = make_proposal_company()
 

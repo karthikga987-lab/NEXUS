@@ -45,6 +45,7 @@ export default function ResearchSources({
   }), [sources, search, activeType]);
   const counts = stats?.latest_run?.counts || {};
   const ingestionCounts = ingestion?.processing_status_counts || {};
+  const processedCount = ingestionCounts.processed ?? ingestionCounts.completed ?? null;
   const totalReports = (sources || []).filter((source) => String(source.source_type || "").toLowerCase().includes("report")).length;
   const totalTypes = new Set((sources || []).map((source) => source.source_type).filter(Boolean)).size;
 
@@ -82,7 +83,7 @@ export default function ResearchSources({
         <article><span>Research status</span><strong>{stats?.research_status || 'Unavailable'}</strong></article>
         <article><span>URLs discovered</span><strong>{counts.discovered ?? '—'}</strong></article>
         <article><span>Documents collected</span><strong>{counts.collected ?? (sources ? sources.filter((item) => item.content_kind !== 'search_snippet').length : '—')}</strong></article>
-        <article><span>Processed</span><strong>{ingestionCounts.processed ?? '—'}</strong></article>
+        <article><span>Processed</span><strong>{processedCount ?? '—'}</strong></article>
         <article><span>Failed</span><strong>{(counts.failed ?? 0) + (ingestionCounts.failed ?? 0)}</strong></article>
         <article><span>Skipped</span><strong>{(counts.skipped_duplicates ?? 0) + (ingestionCounts.skipped ?? 0)}</strong></article>
       </section>

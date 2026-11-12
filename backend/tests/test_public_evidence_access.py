@@ -230,3 +230,50 @@ def test_unauthenticated_read_apis_expose_only_public_evidence(db, monkeypatch):
     with pytest.raises(HTTPException) as error:
         get_proposal_analysis(analysis.id, db)
     assert error.value.status_code == 404
+
+
+def test_saved_proposal_analysis_labels_public_company_evidence_correctly(db):
+    company = Company(
+        name="[SYNTHETIC TEST] Northstar",
+        website="https://northstar.example",
+    )
+    db.add(company)
+    db.flush()
+
+    source = SourceDocument(
+        company_id=company.id,
+        url="https://northstar.example/public-product-page",
+        title="Synthetic public product page",
+        content_text="Public synthetic source text.",
+        permission_status="public",
+        source_type="company_page",
+    )
+    proposal = Proposal(
+        company_id=company.id,
+        title="[SYNTHETIC] Proposal",
+        description="A labelled synthetic proposal.",
+    )
+    db.add_all([source, proposal])
+    db.flush()
+
+    analysis = ProposalAnalysis(
+        proposal_id=proposal.id,
+        status="completed",
+        recommendation="Synthetic recommendation.",
+        risks=[],
+        limitations=[],
+    )
+    db.add(analysis)
+    db.flush()
+    db.add(AnalysisEvidence(
+        analysis_id=analysis.id,
+        source_id=source.id,
+        claim="The public page describes the product.",
+        evidence_classification="unknown",
+    ))
+    db.commit()
+
+    response = get_proposal_analysis(analysis.id, db)
+
+    assert response["claims"][0]["evidence_scope"] == "public_company"
+    assert response["claims"][0]["sources"][0]["evidence_scope"] == "public_company"

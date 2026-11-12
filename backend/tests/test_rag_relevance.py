@@ -307,6 +307,19 @@ class RAGRelevanceTests(unittest.TestCase):
             )
         )
 
+    def test_help_page_reference_words_do_not_hide_shutdown_date(self):
+        query = (
+            "What date did Google Stadia shut down according to the Stadia Help page?"
+        )
+        statement = (
+            "The Stadia service shut down on January 18, 2023."
+        )
+        self.assertEqual(
+            _query_focus_terms(query, "Google Stadia"),
+            {"shut", "down"},
+        )
+        self.assertTrue(_claim_covers_aspect(statement, "date"))
+
     def test_multipart_answer_does_not_include_unrequested_page_facts(self):
         evidence = [{
             "source_id": "synthetic-product-page",
@@ -364,6 +377,133 @@ class RAGRelevanceTests(unittest.TestCase):
                 "outcome",
             )
         )
+
+    def test_reported_attendance_is_a_result_not_effectiveness(self):
+        statement = (
+            "Eighteen people showed up at the first AI class in August, "
+            "almost triple the turnout for other classes."
+        )
+        self.assertTrue(_claim_covers_aspect(statement, "outcome"))
+        self.assertIn(statement, _split_sentences(statement))
+        self.assertFalse(
+            _claim_covers_aspect(
+                "The program was popular with the local community.",
+                "outcome",
+            )
+        )
+
+    def test_focus_filter_keeps_requested_result_from_anchored_source(self):
+        query = (
+            "When did the Mecklenburg County library AI training pilot launch, "
+            "and what results did it report?"
+        )
+        anchor = {
+            "source_id": "synthetic-library-pilot",
+            "source_title": "[SYNTHETIC] Local library training article",
+            "chunk_text": (
+                "SYNTHETIC TEST FIXTURE. The Mecklenburg County library "
+                "launched an AI training pilot."
+            ),
+            "similarity": 0.81,
+        }
+        result = {
+            "source_id": "synthetic-library-pilot",
+            "source_title": "[SYNTHETIC] Local library training article",
+            "chunk_text": (
+                "SYNTHETIC TEST FIXTURE. Eighteen people attended the first "
+                "AI class, almost triple the turnout for other classes."
+            ),
+            "similarity": 0.77,
+        }
+        unrelated = {
+            "source_id": "synthetic-unrelated-ai",
+            "source_title": "[SYNTHETIC] Unrelated product announcement",
+            "chunk_text": (
+                "SYNTHETIC TEST FIXTURE. An unrelated AI feature launched "
+                "for business customers."
+            ),
+            "similarity": 0.95,
+        }
+
+        filtered = _filter_internal_candidates_by_focus(
+            [anchor, result, unrelated],
+            query=query,
+            company_name="Microsoft",
+        )
+        selected = _diversify_internal_results(
+            filtered,
+            limit=5,
+            query=query,
+        )
+
+        self.assertEqual(
+            [item["source_id"] for item in selected],
+            ["synthetic-library-pilot", "synthetic-library-pilot"],
+        )
+        claims = _extract_candidate_claims(
+            [result], query=query, company_name="Microsoft"
+        )
+        self.assertIn(
+            result["chunk_text"].split("SYNTHETIC TEST FIXTURE. ", 1)[1],
+            [item["statement"] for item in claims],
+        )
+
+    def test_diversification_keeps_missing_result_when_unique_sources_fill_limit(self):
+        query = (
+            "When did the Mecklenburg County library AI training pilot launch, "
+            "and what results did it report?"
+        )
+        results = [
+            {
+                "source_id": "synthetic-library-pilot",
+                "chunk_index": 1,
+                "chunk_text": (
+                    "SYNTHETIC TEST FIXTURE. The Mecklenburg County library "
+                    "launched an AI training pilot."
+                ),
+                "similarity": 0.90,
+            },
+            {
+                "source_id": "synthetic-library-background",
+                "chunk_index": 0,
+                "chunk_text": (
+                    "SYNTHETIC TEST FIXTURE. Library staff provide local "
+                    "services to residents."
+                ),
+                "similarity": 0.80,
+            },
+            {
+                "source_id": "synthetic-company-background",
+                "chunk_index": 0,
+                "chunk_text": (
+                    "SYNTHETIC TEST FIXTURE. Community programs support "
+                    "technology access."
+                ),
+                "similarity": 0.75,
+            },
+            {
+                "source_id": "synthetic-library-pilot",
+                "chunk_index": 2,
+                "chunk_text": (
+                    "SYNTHETIC TEST FIXTURE. Eighteen people attended the "
+                    "first AI class, almost triple the turnout for other classes."
+                ),
+                "similarity": 0.60,
+            },
+        ]
+
+        selected = _diversify_internal_results(
+            results,
+            limit=3,
+            query=query,
+        )
+
+        assert [item["source_id"] for item in selected] == [
+            "synthetic-library-pilot",
+            "synthetic-library-background",
+            "synthetic-library-pilot",
+        ]
+        assert selected[-1]["chunk_index"] == 2
 
     def test_launch_timing_geography_words_do_not_block_event_evidence(self):
         query = "What launch timing and geography are documented for TRESemmé Professional?"

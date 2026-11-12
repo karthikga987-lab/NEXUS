@@ -4,10 +4,24 @@ import { api } from '../api/client';
 import './ProposalAnalysis.css';
 
 function EvidenceCard({ item }) {
+  const relevanceLabels = {
+    directly_relevant: 'Directly relevant context',
+    same_company_historical: 'Same-company historical context',
+    competitor_context: 'Competitor context',
+    general_industry_context: 'General industry context',
+    related_insufficient: 'Related, but insufficient',
+    irrelevant: 'Irrelevant',
+  };
+
   return <article className="proposal-evidence-card">
     <div className="proposal-card-top"><span className="proposal-category">{item.evidence_scope || item.permission_status || 'Evidence scope unavailable'}</span><span>{item.similarity == null ? 'Similarity unavailable' : `${(Number(item.similarity) * 100).toFixed(1)}% similarity`}</span></div>
     <h4>{item.source_title || 'Untitled source'}</h4>
     <p>{item.source_company_name || 'Company unavailable'}</p>
+    <p className="proposal-relevance-label">
+      Relevance assessment: {relevanceLabels[item.proposal_relevance] || 'Not classified; candidate only'}
+      {item.proposal_aspect ? ` · ${item.proposal_aspect}` : ''}
+    </p>
+    {item.proposal_relevance_reason && <p className="proposal-relevance-note">{item.proposal_relevance_reason}</p>}
     <blockquote>{item.retrieved_passage || 'Retrieved excerpt unavailable.'}</blockquote>
     {item.source_url && <a href={item.source_url} target="_blank" rel="noreferrer">Open source <ExternalLink size={13} /></a>}
   </article>;
@@ -95,9 +109,9 @@ export default function ProposalAnalysis({ company }) {
           </article>) : <p>No factual claims passed evidence verification.</p>}
         </section>
 
-        <section className="proposal-analysis-section"><h3><Search size={17} /> Supporting evidence passages</h3>
+        <section className="proposal-analysis-section"><h3><Search size={17} /> Retrieved evidence and context</h3>
           {evidence.length ? <div className="proposal-evidence-grid">{evidence.map((item, index) => <EvidenceCard key={`${item.source_id}-${item.chunk_index ?? index}`} item={item} />)}</div> : <p>No documentary evidence was returned. The recommendation should be treated conservatively.</p>}
-          <small>The API returns eligible evidence passages but does not separately label a contradiction set; absence of a returned passage does not establish that no contrary evidence exists.</small>
+          <small>Relevance assessments are contextual model classifications, not fact verification. External sources describe their named company and do not establish the proposing company’s history. Only sources attached to evidence-checked claims are citations; missing retrieved context does not establish that no contrary evidence exists.</small>
         </section>
 
         {analysis.customer_feedback_context && <section className="proposal-analysis-section"><h3>Customer feedback signal</h3>

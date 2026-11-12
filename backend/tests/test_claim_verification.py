@@ -167,6 +167,40 @@ def test_fabricated_supporting_quote_is_rejected(monkeypatch):
     assert error is not None
 
 
+def test_gorilla_feature_does_not_verify_a_milton_claim(monkeypatch):
+    statement = "Milton developed a smart temperature display bottle."
+    source_passage = (
+        "Gorilla Wear's insulated bottle has a temperature display."
+    )
+
+    def fake_ollama_batch(items):
+        assert items[0]["statement"] == statement
+        assert items[0]["source_company_name"] == "Gorilla Wear"
+        return [{
+            "request_id": items[0]["request_id"],
+            "claim_index": items[0]["claim_index"],
+            "source_id": items[0]["source_id"],
+            "supported": False,
+            "supporting_quote": "",
+        }], None
+
+    monkeypatch.setattr(
+        claim_verification,
+        "_call_ollama_batch",
+        fake_ollama_batch,
+    )
+    validated, error = claim_verification.verify_claim_citations(
+        claims=[make_claim(statement)],
+        source_text_by_id={"source-1": source_passage},
+        source_context_by_id={
+            "source-1": {"source_company_name": "Gorilla Wear"},
+        },
+    )
+
+    assert validated == {}
+    assert error is not None
+
+
 def test_claim_with_no_source_passage_is_not_verified():
     validated, error = claim_verification.verify_claim_citations(
         claims=[make_claim("The company launched a new plan.")],

@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.db.session import get_db
 from app.models import Company, SourceDocument, ProductEvent
@@ -13,6 +13,7 @@ from app.schemas.contracts import (
 )
 from app.research.service import collect_company_sources
 from app.research.discovery import SourceDiscoveryError
+from app.research.onboarding import run_company_onboarding, reserve_onboarding
 
 
 router = APIRouter()
@@ -21,13 +22,33 @@ router = APIRouter()
 @router.post("", response_model=CompanyOut, status_code=201)
 def create_company(
     payload: CompanyCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     company = Company(**payload.model_dump())
+    if company.website:
+        company.research_status = "queued"
+    else:
+        company.research_status = "not_started"
 
     db.add(company)
     db.commit()
     db.refresh(company)
+
+    if company.website and reserve_onboarding(company.id):
+        # Use the exact engine selected by this request (including test and
+        # temporary databases), never the module-global development database.
+        factory = sessionmaker(
+            bind=db.get_bind(),
+            autoflush=False,
+            autocommit=False,
+            expire_on_commit=False,
+        )
+        background_tasks.add_task(
+            run_company_onboarding,
+            company.id,
+            factory,
+        )
 
     return company
 
@@ -76,6 +97,12 @@ def start_research(
         raise HTTPException(
             status_code=400,
             detail="Company does not have a website configured.",
+        )
+
+    if company.research_status in {"queued", "running"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Company research is already in progress.",
         )
 
     try:

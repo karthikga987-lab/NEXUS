@@ -127,12 +127,48 @@ def test_invalid_json_after_retry_raises_controlled_error(monkeypatch):
             "synthetic-company-id",
         )
 
-    assert len(calls) == 2
+    assert len(calls) == 3
     budgets = [
         json.loads(request.data.decode("utf-8"))["options"]["num_predict"]
         for request, _timeout in calls
     ]
-    assert budgets == [2048, 4096]
+    assert budgets == [2048, 4096, 8192]
+
+
+def test_truncated_response_gets_bounded_larger_budget_retry(monkeypatch):
+    complete = json.dumps({"events": [], "knowledge_items": []})
+    calls = _mock_ollama(
+        monkeypatch,
+        ['{"events": [{"title": "truncated', '```json\n{"events": []', complete],
+    )
+
+    assert extraction.extract_events(
+        "A current product description.",
+        "synthetic-source-id",
+        "synthetic-company-id",
+    ) == []
+    budgets = [
+        json.loads(request.data.decode("utf-8"))["options"]["num_predict"]
+        for request, _timeout in calls
+    ]
+    assert budgets == [2048, 4096, 8192]
+
+
+def test_long_source_starts_with_larger_bounded_budget(monkeypatch):
+    complete = json.dumps({"events": [], "knowledge_items": []})
+    calls = _mock_ollama(monkeypatch, ["not json", complete])
+    source_text = "[SYNTHETIC LONG SOURCE] " + ("Acme product information. " * 400)
+
+    assert extraction._ask_ollama(source_text) == {
+        "events": [],
+        "knowledge_items": [],
+    }
+    budgets = [
+        json.loads(request.data.decode("utf-8"))["options"]["num_predict"]
+        for request, _timeout in calls
+    ]
+    assert budgets == [8192, 12288]
+    assert extraction.EVENT_RESPONSE_SCHEMA["properties"]["knowledge_items"]["maxItems"] == 4
 
 
 def test_invalid_structured_event_is_retried_and_then_rejected(monkeypatch):

@@ -58,8 +58,9 @@ export default function CompanySidebar({ onNavigate }) {
               className={`sidebar-link ${
                 activeItem === item.id ? "active" : ""
               }`}
+              aria-label={item.label}
+              title={item.label}
               onClick={() => handleNavigation(item.id)}
-              title={collapsed ? item.label : ""}
             >
               <Icon size={19} />
               {!collapsed && <span>{item.label}</span>}
