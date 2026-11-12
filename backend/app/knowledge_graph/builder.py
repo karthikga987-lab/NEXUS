@@ -64,15 +64,44 @@ def build_company_graph(
         research_status=_safe_value(company.research_status),
     )
 
-    events = (
-        db.query(ProductEvent)
-        .filter(ProductEvent.company_id == company_id)
+    sources = (
+        db.query(SourceDocument)
+        .filter(
+            SourceDocument.company_id == company_id,
+            SourceDocument.permission_status == "public",
+        )
         .all()
     )
 
-    sources = (
-        db.query(SourceDocument)
-        .filter(SourceDocument.company_id == company_id)
+    event_source_rows = db.execute(
+        select(
+            event_sources.c.event_id,
+            event_sources.c.source_id,
+        )
+        .join(
+            SourceDocument,
+            SourceDocument.id == event_sources.c.source_id,
+        )
+        .where(
+            SourceDocument.company_id == company_id,
+        )
+    ).all()
+    source_ids_by_event: dict[str, set[str]] = {}
+    for row in event_source_rows:
+        source_ids_by_event.setdefault(row.event_id, set()).add(row.source_id)
+
+    public_source_ids = {source.id for source in sources}
+    eligible_event_ids = {
+        event_id
+        for event_id, event_source_ids in source_ids_by_event.items()
+        if event_source_ids and event_source_ids.issubset(public_source_ids)
+    }
+    events = (
+        db.query(ProductEvent)
+        .filter(
+            ProductEvent.company_id == company_id,
+            ProductEvent.id.in_(eligible_event_ids),
+        )
         .all()
     )
 
@@ -166,10 +195,36 @@ def build_company_graph(
             )
 
     # Persisted event-to-event relationships
+    relationship_source_rows = db.execute(
+        select(
+            relationship_sources.c.relationship_id,
+            relationship_sources.c.source_id,
+        )
+        .join(
+            SourceDocument,
+            SourceDocument.id == relationship_sources.c.source_id,
+        )
+        .where(
+            SourceDocument.company_id == company_id,
+        )
+    ).all()
+    source_ids_by_relationship: dict[str, set[str]] = {}
+    for row in relationship_source_rows:
+        source_ids_by_relationship.setdefault(
+            row.relationship_id, set()
+        ).add(row.source_id)
+    eligible_relationship_ids = {
+        relationship_id
+        for relationship_id, relationship_source_ids
+        in source_ids_by_relationship.items()
+        if relationship_source_ids
+        and relationship_source_ids.issubset(public_source_ids)
+    }
     relationships = (
         db.query(EventRelationship)
         .filter(
             EventRelationship.company_id == company_id,
+            EventRelationship.id.in_(eligible_relationship_ids),
         )
         .all()
     )

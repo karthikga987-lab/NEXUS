@@ -119,6 +119,30 @@ class Company(Base):
     )
 
 
+class ResearchRun(Base):
+    """Persisted summary counters for one bounded company research run."""
+
+    __tablename__ = "research_runs"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=new_id
+    )
+    company_id: Mapped[str] = mapped_column(
+        ForeignKey("companies.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(40), default="running")
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    counts: Mapped[dict] = mapped_column(JSON, default=dict)
+    failure_summary: Mapped[str | None] = mapped_column(
+        String(500), nullable=True
+    )
+
+
 class SourceDocument(Base):
     __tablename__ = "source_documents"
 
@@ -161,6 +185,123 @@ class SourceDocument(Base):
     )
     source_metadata: Mapped[dict | None] = mapped_column(
         "metadata", JSON, nullable=True
+    )
+
+    @property
+    def original_url(self) -> str | None:
+        metadata = self.source_metadata if isinstance(self.source_metadata, dict) else {}
+        return metadata.get("original_url", self.url)
+
+    @property
+    def content_excerpt(self) -> str | None:
+        return (self.content_text or "")[:1200] or None
+
+    @property
+    def evidence_origin(self) -> str | None:
+        metadata = self.source_metadata if isinstance(self.source_metadata, dict) else {}
+        return metadata.get("evidence_origin", "public_company" if self.permission_status == "public" else "authorized_internal")
+
+    @property
+    def source_classification(self) -> str | None:
+        metadata = self.source_metadata if isinstance(self.source_metadata, dict) else {}
+        return metadata.get("source_category", "company_page")
+
+    @property
+    def content_kind(self) -> str | None:
+        metadata = self.source_metadata if isinstance(self.source_metadata, dict) else {}
+        return metadata.get("content_kind", "full_document")
+
+    @property
+    def discovery_method(self) -> str | None:
+        metadata = self.source_metadata if isinstance(self.source_metadata, dict) else {}
+        return metadata.get("discovery_method")
+
+    @property
+    def extracted_event_evidence(self) -> list[dict]:
+        metadata = self.source_metadata if isinstance(self.source_metadata, dict) else {}
+        evidence = metadata.get("extracted_event_evidence")
+        return evidence if isinstance(evidence, list) else []
+
+    @property
+    def event_date(self) -> datetime | None:
+        metadata = self.source_metadata if isinstance(self.source_metadata, dict) else {}
+        entries = metadata.get("extracted_event_evidence")
+        if isinstance(entries, list):
+            if len(entries) == 1 and isinstance(entries[0], dict):
+                raw_value = entries[0].get("event_date")
+            else:
+                return None
+        else:
+            raw_value = metadata.get("event_date")
+        if not isinstance(raw_value, str):
+            return None
+        try:
+            return datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+
+class KnowledgeItem(Base):
+    """Evidence-linked company knowledge that is not necessarily an event."""
+
+    __tablename__ = "knowledge_items"
+    __table_args__ = (
+        CheckConstraint(
+            "item_type IN ('proposal', 'decision', 'concern', 'feedback', "
+            "'action_item', 'outcome')",
+            name="ck_knowledge_items_type",
+        ),
+        CheckConstraint(
+            "status IN ('proposed', 'approved', 'rejected', 'deferred', "
+            "'in_progress', 'completed', 'open', 'resolved', 'unknown')",
+            name="ck_knowledge_items_status",
+        ),
+        CheckConstraint(
+            "evidence_classification IN ('documented', 'supported', "
+            "'correlation', 'inference', 'unknown')",
+            name="ck_knowledge_items_evidence_classification",
+        ),
+        CheckConstraint(
+            "extraction_confidence IS NULL OR "
+            "(extraction_confidence >= 0 AND extraction_confidence <= 1)",
+            name="ck_knowledge_items_confidence_range",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=new_id
+    )
+    company_id: Mapped[str] = mapped_column(
+        ForeignKey("companies.id", ondelete="CASCADE"), index=True
+    )
+    source_id: Mapped[str] = mapped_column(
+        ForeignKey("source_documents.id", ondelete="CASCADE"), index=True
+    )
+    item_type: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(String(500))
+    description: Mapped[str] = mapped_column(Text)
+    subject_name: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    actor: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(40), default="unknown")
+    item_date: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    evidence_quote: Mapped[str] = mapped_column(Text)
+    evidence_classification: Mapped[str] = mapped_column(
+        String(40), default="documented"
+    )
+    extraction_confidence: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+    collected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
     )
 
 

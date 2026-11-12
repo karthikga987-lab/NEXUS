@@ -1,9 +1,10 @@
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.core.local_access import require_local_internal_access
 from app.models import Company, SourceDocument
 
 from app.intelligence.embeddings import (
@@ -40,6 +41,7 @@ class SemanticSearchRequest(BaseModel):
         default=False,
         description="Whether to retrieve public evidence from other companies.",
     )
+    include_authorized_internal: bool = False
 
 
 class RAGAnswerRequest(BaseModel):
@@ -62,12 +64,14 @@ class RAGAnswerRequest(BaseModel):
         default=False,
         description="Whether to include public evidence from other companies.",
     )
+    include_authorized_internal: bool = False
 
 
 @router.post("/search", status_code=200)
 def semantic_search(
     payload: SemanticSearchRequest,
     db: Session = Depends(get_db),
+    request: Request = None,
 ):
     company = db.get(Company, payload.company_id)
 
@@ -77,12 +81,18 @@ def semantic_search(
             detail="Company not found",
         )
 
+    if payload.include_authorized_internal:
+        if request is None:
+            raise HTTPException(status_code=403, detail="Authorized internal evidence is only available through the trusted local API.")
+        require_local_internal_access(request)
+
     try:
         internal_results = search_similar_chunks(
             db=db,
             query=payload.query,
             company_id=payload.company_id,
             limit=payload.limit,
+            include_authorized_internal=payload.include_authorized_internal,
         )
 
         formatted_internal = []
@@ -102,7 +112,8 @@ def semantic_search(
                 "chunk_index": item.get("chunk_index"),
                 "similarity": item.get("similarity"),
                 "retrieved_passage": item.get("chunk_text"),
-                "evidence_scope": "internal",
+                "evidence_scope": item.get("evidence_scope", "public_company"),
+                "evidence_origin": item.get("evidence_origin") or "public_company",
                 "permission_status": source.permission_status,
                 "evidence_classification": "unknown",
             })
@@ -139,6 +150,7 @@ def semantic_search(
             "company_name": company.name,
             "query": payload.query,
             "internal_result_count": len(formatted_internal),
+            "authorized_internal_result_count": sum(1 for item in formatted_internal if item.get("permission_status") == "authorized_internal"),
             "external_public_result_count": len(formatted_external),
             "internal_evidence": formatted_internal,
             "external_public_evidence": formatted_external,
@@ -161,6 +173,7 @@ def semantic_search(
 def answer_question(
     payload: RAGAnswerRequest,
     db: Session = Depends(get_db),
+    request: Request = None,
 ):
     company = db.get(Company, payload.company_id)
 
@@ -170,6 +183,11 @@ def answer_question(
             detail="Company not found",
         )
 
+    if payload.include_authorized_internal:
+        if request is None:
+            raise HTTPException(status_code=403, detail="Authorized internal evidence is only available through the trusted local API.")
+        require_local_internal_access(request)
+
     try:
         return answer_with_evidence(
             db=db,
@@ -177,6 +195,7 @@ def answer_question(
             query=payload.query,
             limit=payload.limit,
             include_external_public=payload.include_external_public,
+            include_authorized_internal=payload.include_authorized_internal,
         )
 
     except EmbeddingError as exc:

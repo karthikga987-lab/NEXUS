@@ -24,12 +24,11 @@ from app.models.entities import (
 SOURCE_TEXT = (
     "Spotify introduced Family Mix for Premium Family members. "
     "The feature creates a shared playlist based on members' "
-    "listening preferences."
+    "listening preferences. The plan resulted in the introduction "
+    "of Family Mix."
 )
 
-SUPPORTING_QUOTE = (
-    "Spotify introduced Family Mix for Premium Family members."
-)
+SUPPORTING_QUOTE = "The plan resulted in the introduction of Family Mix."
 
 EVENT_IDS = {
     "event-family-mix",
@@ -92,6 +91,20 @@ class RelationshipExtractionTests(unittest.TestCase):
             error,
             "supporting_quote_not_found_exactly",
         )
+
+    def test_temporal_sequence_does_not_support_causal_relationship(self):
+        quote = "Spotify introduced Family Mix after the plan update."
+        validated, error = validate_relationship_candidate(
+            candidate=make_candidate(
+                relation_type="MOTIVATED_BY",
+                supporting_quote=quote,
+            ),
+            event_ids=EVENT_IDS,
+            source_text=quote,
+        )
+
+        self.assertIsNone(validated)
+        self.assertEqual(error, "causal_relationship_not_explicit")
 
     def test_invalid_relationship_type_is_rejected(self):
         validated, error = validate_relationship_candidate(

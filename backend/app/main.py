@@ -10,6 +10,7 @@ from app.api.routes import (
     ingestion,
     knowledge_graph,
     proposals,
+    company_extras,
 )
 
 
@@ -72,3 +73,9 @@ def health():
         "status": "ok",
         "service": "nexus-api",
     }
+
+app.include_router(
+    company_extras.router,
+    prefix="/api/companies",
+    tags=["Company Knowledge"],
+)

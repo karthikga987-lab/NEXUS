@@ -161,3 +161,76 @@ def test_cosine_similarity_rejects_different_dimensions():
             [1.0, 0.0],
             [1.0, 0.0, 0.0],
         )
+
+
+def test_internal_search_applies_configured_similarity_threshold(
+    tmp_path,
+    monkeypatch,
+):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.session import Base
+    from app.models import Company, DocumentEmbedding, SourceDocument
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'similarity.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    session = session_factory()
+    try:
+        company = Company(name="[SYNTHETIC TEST] Retrieval", website="https://retrieval.example")
+        session.add(company)
+        session.flush()
+
+        relevant = SourceDocument(
+            company_id=company.id,
+            url="https://retrieval.example/relevant",
+            title="Synthetic relevant source",
+            content_text="Relevant synthetic passage.",
+            permission_status="public",
+            source_type="press_release",
+        )
+        tangential = SourceDocument(
+            company_id=company.id,
+            url="https://retrieval.example/tangential",
+            title="Synthetic tangential source",
+            content_text="Tangential synthetic passage.",
+            permission_status="public",
+            source_type="press_release",
+        )
+        session.add_all([relevant, tangential])
+        session.flush()
+        session.add_all([
+            DocumentEmbedding(
+                source_id=relevant.id,
+                chunk_index=0,
+                chunk_text="Relevant synthetic passage.",
+                embedding=[1.0, 0.0],
+                model_name=embeddings.EMBEDDING_MODEL,
+            ),
+            DocumentEmbedding(
+                source_id=tangential.id,
+                chunk_index=0,
+                chunk_text="Tangential synthetic passage.",
+                embedding=[0.0, 1.0],
+                model_name=embeddings.EMBEDDING_MODEL,
+            ),
+        ])
+        session.commit()
+
+        monkeypatch.setattr(embeddings, "INTERNAL_MIN_SIMILARITY", 0.5)
+        monkeypatch.setattr(
+            embeddings,
+            "generate_embeddings",
+            lambda texts: [[1.0, 0.0] for _ in texts],
+        )
+
+        results = embeddings.search_similar_chunks(
+            session,
+            query="synthetic relevance",
+            company_id=company.id,
+        )
+        assert [item["source_id"] for item in results] == [relevant.id]
+    finally:
+        session.close()
+        engine.dispose()

@@ -1066,3 +1066,47 @@ Status: Draft – verify against backend before freezing.
 
 
 
+
+## Additive v1 Extension: Knowledge Items and Research Runs
+
+This backward-compatible extension leaves every existing v1 entity, field, endpoint, and enum unchanged. It adds two new records required for evidence-linked non-event knowledge and persisted research statistics. Migration `d4e6c8a109bf` creates only these tables.
+
+### KnowledgeItem
+
+| Field | Type | Required |
+|---|---|---|
+| id | UUID | Yes |
+| company_id | UUID | Yes |
+| source_id | UUID (Source.id) | Yes |
+| item_type | Enum | Yes |
+| title | String | Yes |
+| description | Text | Yes |
+| subject_name | String | No |
+| actor | String | No |
+| status | Enum | Yes |
+| item_date | Datetime UTC | No |
+| evidence_quote | Text, exact source excerpt | Yes |
+| evidence_classification | Existing evidence classification | Yes |
+| extraction_confidence | Float from 0 to 1 | No |
+| created_at | Datetime UTC | Yes |
+| collected_at | Datetime UTC | Yes |
+
+Allowed `item_type` values: `proposal`, `decision`, `concern`, `feedback`, `action_item`, `outcome`.
+
+Allowed `status` values: `proposed`, `approved`, `rejected`, `deferred`, `in_progress`, `completed`, `open`, `resolved`, `unknown`.
+
+A KnowledgeItem supplements ProductEvent and does not replace or duplicate event extraction. Every item points to the existing Source record and must retain an exact quotation present in that source. `item_date` is null unless an exact source date quotation supports it.
+
+### Authorized local document representation
+
+Internal text documents use the existing Source entity with `source_type=internal_document` and `permission_status=authorized_internal`. Their `url` value is an opaque `internal://` reference, not a public web link. Original filename, author/date metadata, synthetic label, and evidence origin are stored in the existing Source metadata JSON. Only `.txt` and `.md` uploads are supported by this implementation. Internal source APIs and AI retrieval require explicit local-development enablement and a loopback request; they are not production-secure without authentication and authorization.
+
+### ResearchRun
+
+A ResearchRun stores per-company research status, start/completion timestamps, summary counts, and a safe failure summary. It does not store fetched page bodies or search-result snippets. `counts` are JSON for the bounded run and do not add enum values to the existing Company contract.
+
+Downgrade refuses to drop either table while rows exist, preventing accidental loss of KnowledgeItem or research-run data.
+
+### Additive source API provenance fields
+
+The existing `GET /api/companies/{company_id}/sources` response retains all prior fields. Optional response fields expose the original discovered URL, a bounded content excerpt, source classification/origin, permission status, collection timestamp, content kind, discovery method, and exact event quotations already stored in Source metadata. `event_date` is returned only when exactly one linked extracted event has a documented date; otherwise it is null. Extraction confidence is an AI estimate and does not establish truth. These response-only fields do not add or alter Source table columns.

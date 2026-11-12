@@ -1,9 +1,11 @@
 ﻿
 import json
+from functools import lru_cache
 import math
 import os
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy.orm import Session
 
@@ -14,10 +16,23 @@ OLLAMA_EMBED_URL = "http://localhost:11434/api/embed"
 EMBEDDING_MODEL = "nomic-embed-text"
 EMBEDDING_DIMENSIONS = 768
 
+# Internal semantic search and proposal/RAG retrieval share this minimum.
+# Set NEXUS_INTERNAL_MIN_SIMILARITY to tune it for a deployment's corpus.
+INTERNAL_MIN_SIMILARITY = float(
+    os.getenv("NEXUS_INTERNAL_MIN_SIMILARITY", "0.35")
+)
+if not -1.0 <= INTERNAL_MIN_SIMILARITY <= 1.0:
+    raise ValueError(
+        "NEXUS_INTERNAL_MIN_SIMILARITY must be between -1.0 and 1.0."
+    )
+
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
 
-ALLOWED_PERMISSION_STATUSES = {"public", "authorized_internal"}
+# Authorized internal documents require an explicit local-only opt-in at
+# the API boundary. These function defaults remain public-only.
+PUBLIC_PERMISSION_STATUSES = {"public"}
+AUTHORIZED_INTERNAL_PERMISSION_STATUS = "authorized_internal"
 
 # External evidence below this similarity score is excluded.
 # Override with NEXUS_EXTERNAL_MIN_SIMILARITY when needed.
@@ -163,6 +178,7 @@ def generate_embeddings(texts: list[str]) -> list[list[float]]:
 def embed_source(
     db: Session,
     source_id: str,
+    include_authorized_internal: bool = False,
 ) -> dict:
     """Chunk, embed, and persist one permitted source document."""
 
@@ -171,7 +187,10 @@ def embed_source(
     if source is None:
         raise ValueError(f"Source document not found: {source_id}")
 
-    if source.permission_status not in ALLOWED_PERMISSION_STATUSES:
+    allowed_statuses = set(PUBLIC_PERMISSION_STATUSES)
+    if include_authorized_internal:
+        allowed_statuses.add(AUTHORIZED_INTERNAL_PERMISSION_STATUS)
+    if source.permission_status not in allowed_statuses:
         raise ValueError(
             f"Source cannot be embedded: permission status is "
             f"'{source.permission_status}'."
@@ -241,11 +260,24 @@ def cosine_similarity(
     return dot_product / (norm_a * norm_b)
 
 
+@lru_cache(maxsize=128)
+def _cached_query_embedding(query_text: str, model_name: str) -> tuple[float, ...]:
+    """Cache normalized query vectors for the active embedding model."""
+    del model_name  # The model is part of the cache key by design.
+    return tuple(generate_embeddings([query_text])[0])
+
+
+def _query_embedding(query: str) -> list[float]:
+    normalized = " ".join(query.split())
+    return list(_cached_query_embedding(normalized, EMBEDDING_MODEL))
+
+
 def search_similar_chunks(
     db: Session,
     query: str,
     company_id: str | None = None,
     limit: int = 5,
+    include_authorized_internal: bool = False,
 ) -> list[dict]:
     """Retrieve permitted document chunks ranked by semantic similarity."""
 
@@ -255,7 +287,11 @@ def search_similar_chunks(
     if limit <= 0:
         raise ValueError("limit must be positive.")
 
-    query_vector = generate_embeddings([query.strip()])[0]
+    query_vector = _query_embedding(query.strip())
+
+    allowed_statuses = set(PUBLIC_PERMISSION_STATUSES)
+    if include_authorized_internal:
+        allowed_statuses.add(AUTHORIZED_INTERNAL_PERMISSION_STATUS)
 
     db_query = (
         db.query(DocumentEmbedding, SourceDocument)
@@ -265,9 +301,7 @@ def search_similar_chunks(
         )
         .filter(
             DocumentEmbedding.model_name == EMBEDDING_MODEL,
-            SourceDocument.permission_status.in_(
-                ALLOWED_PERMISSION_STATUSES
-            ),
+            SourceDocument.permission_status.in_(allowed_statuses),
         )
     )
 
@@ -284,13 +318,28 @@ def search_similar_chunks(
             embedding_record.embedding,
         )
 
+        if score < INTERNAL_MIN_SIMILARITY:
+            continue
+
+        metadata = source.source_metadata if isinstance(source.source_metadata, dict) else {}
         results.append({
             "source_id": source.id,
             "source_title": source.title,
-            "source_url": source.url,
+            "source_url": metadata.get("original_url") or source.url,
             "chunk_index": embedding_record.chunk_index,
             "chunk_text": embedding_record.chunk_text,
             "similarity": score,
+            "permission_status": source.permission_status,
+            "evidence_scope": (
+                "authorized_internal"
+                if source.permission_status == "authorized_internal"
+                else "public_company"
+            ),
+            "evidence_origin": (
+                (source.source_metadata or {}).get("evidence_origin")
+                if isinstance(source.source_metadata, dict)
+                else None
+            ),
         })
 
     results.sort(
@@ -301,33 +350,94 @@ def search_similar_chunks(
     return results[:limit]
 
 
+def _normalize_external_url(url: str | None) -> str | None:
+    """Normalize a URL for duplicate-page detection."""
+
+    if not url or not url.strip():
+        return None
+
+    try:
+        parsed = urlsplit(url.strip())
+
+        scheme = parsed.scheme.lower()
+        netloc = parsed.netloc.lower()
+
+        # Remove default ports without changing other ports.
+        if scheme == "https" and netloc.endswith(":443"):
+            netloc = netloc[:-4]
+        elif scheme == "http" and netloc.endswith(":80"):
+            netloc = netloc[:-3]
+
+        path = parsed.path.rstrip("/") or "/"
+
+        # Preserve query parameters; remove only the URL fragment.
+        return urlunsplit((
+            scheme,
+            netloc,
+            path,
+            parsed.query,
+            "",
+        ))
+
+    except (TypeError, ValueError):
+        return url.strip()
+
+
 def _diversify_external_results(
     results: list[dict],
     limit: int,
 ) -> list[dict]:
     """
-    Apply soft company and source diversity to external retrieval.
+    Deduplicate external evidence by normalized URL and source ID.
 
-    A company receives a one-time ranking bonus until it has contributed
-    a result. A source receives a smaller one-time bonus until it has
-    contributed a chunk.
-
-    This is a soft preference, not a quota. Original similarity scores
-    are preserved, and strongly more relevant evidence can still rank
-    ahead of less relevant evidence.
+    Retain the highest-similarity passage for each unique page.
+    Apply company diversity to the remaining results without modifying
+    their original similarity scores.
     """
 
-    remaining = list(results)
-    selected = []
+    best_by_page = {}
 
+    for item in results:
+        normalized_url = _normalize_external_url(
+            item.get("source_url")
+        )
+
+        # Use source ID when a URL is unavailable.
+        deduplication_key = (
+            ("url", normalized_url)
+            if normalized_url
+            else ("source", item["source_id"])
+        )
+
+        existing = best_by_page.get(deduplication_key)
+
+        if (
+            existing is None
+            or item["similarity"] > existing["similarity"]
+        ):
+            best_by_page[deduplication_key] = item
+
+    # Retain source-level uniqueness as an additional safeguard.
+    best_by_source = {}
+
+    for item in best_by_page.values():
+        source_id = item["source_id"]
+        existing = best_by_source.get(source_id)
+
+        if (
+            existing is None
+            or item["similarity"] > existing["similarity"]
+        ):
+            best_by_source[source_id] = item
+
+    remaining = list(best_by_source.values())
+    selected = []
     represented_companies = set()
-    represented_sources = set()
 
     while remaining and len(selected) < limit:
 
         def adjusted_score(item: dict) -> tuple[float, float]:
             company_id = item["source_company_id"]
-            source_id = item["source_id"]
             similarity = item["similarity"]
 
             company_bonus = (
@@ -336,14 +446,8 @@ def _diversify_external_results(
                 else 0.0
             )
 
-            source_bonus = (
-                EXTERNAL_SOURCE_DIVERSITY_BONUS
-                if source_id not in represented_sources
-                else 0.0
-            )
-
             return (
-                similarity + company_bonus + source_bonus,
+                similarity + company_bonus,
                 similarity,
             )
 
@@ -354,13 +458,7 @@ def _diversify_external_results(
 
         chosen = remaining.pop(best_index)
         selected.append(chosen)
-
-        represented_companies.add(
-            chosen["source_company_id"]
-        )
-        represented_sources.add(
-            chosen["source_id"]
-        )
+        represented_companies.add(chosen["source_company_id"])
 
     return selected
 
@@ -388,7 +486,7 @@ def search_external_public_chunks(
     if limit <= 0:
         raise ValueError("limit must be positive.")
 
-    query_vector = generate_embeddings([query.strip()])[0]
+    query_vector = _query_embedding(query.strip())
 
     db_query = (
         db.query(DocumentEmbedding, SourceDocument, Company)
@@ -419,10 +517,11 @@ def search_external_public_chunks(
         if score < EXTERNAL_MIN_SIMILARITY:
             continue
 
+        metadata = source.source_metadata if isinstance(source.source_metadata, dict) else {}
         results.append({
             "source_id": source.id,
             "source_title": source.title,
-            "source_url": source.url,
+            "source_url": metadata.get("original_url") or source.url,
             "source_company_id": source_company.id,
             "source_company_name": source_company.name,
             "source_company_industry": source_company.industry,

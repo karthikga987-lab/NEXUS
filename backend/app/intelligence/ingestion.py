@@ -12,6 +12,7 @@ from app.intelligence.embeddings import embed_source
 from app.intelligence.extraction import extract_events
 from app.models.entities import (
     Company,
+    KnowledgeItem,
     ProductEvent,
     SourceDocument,
     event_sources,
@@ -297,6 +298,68 @@ def _build_event_evidence_result(
     }
 
 
+def _persist_knowledge_item(
+    db: Session,
+    source: SourceDocument,
+    item_data: dict[str, Any],
+) -> tuple[KnowledgeItem, bool]:
+    """Persist one exact-quote item and deduplicate within its source."""
+    if source.company_id != item_data.get("company_id"):
+        raise IngestionError(
+            "Knowledge item company does not match its source company."
+        )
+    if source.id != item_data.get("source_id"):
+        raise IngestionError(
+            "Knowledge item source does not match the ingested document."
+        )
+    quote = item_data.get("evidence_quote")
+    if not isinstance(quote, str) or quote not in (source.content_text or ""):
+        raise IngestionError(
+            "Knowledge item quotation is not an exact source excerpt."
+        )
+
+    existing = (
+        db.query(KnowledgeItem)
+        .filter(
+            KnowledgeItem.company_id == source.company_id,
+            KnowledgeItem.source_id == source.id,
+            KnowledgeItem.item_type == item_data["item_type"],
+            KnowledgeItem.evidence_quote == quote,
+        )
+        .first()
+    )
+    fields = {
+        "title": item_data["title"],
+        "description": item_data["description"],
+        "subject_name": item_data.get("subject_name"),
+        "actor": item_data.get("actor"),
+        "status": item_data.get("status", "unknown"),
+        "item_date": item_data.get("item_date"),
+        "evidence_classification": item_data.get(
+            "evidence_classification", "documented"
+        ),
+        "extraction_confidence": item_data.get("extraction_confidence"),
+    }
+
+    if existing is not None:
+        for key, value in fields.items():
+            setattr(existing, key, value)
+        db.flush()
+        return existing, False
+
+    item = KnowledgeItem(
+        company_id=source.company_id,
+        source_id=source.id,
+        item_type=item_data["item_type"],
+        evidence_quote=quote,
+        collected_at=source.collected_at,
+        **fields,
+    )
+    db.add(item)
+    db.flush()
+    return item, True
+
+
 def _update_source_metadata(
     source: SourceDocument,
     updates: dict[str, Any],
@@ -316,6 +379,7 @@ def _mark_failed(
     source_id: str,
     error: Exception,
     failed_stage: str,
+    embedding_result: dict[str, Any] | None = None,
 ) -> None:
     db.rollback()
 
@@ -326,16 +390,19 @@ def _mark_failed(
 
     source.processing_status = "failed"
 
-    _update_source_metadata(
-        source,
-        {
-            "ingestion_error": str(error)[:1000],
-            "ingestion_failed_stage": failed_stage,
-            "ingestion_failed_at": datetime.now(
-                timezone.utc
-            ).isoformat(),
-        },
-    )
+    updates = {
+        "ingestion_error": str(error)[:1000],
+        "ingestion_failed_stage": failed_stage,
+        "ingestion_failed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if isinstance(embedding_result, dict):
+        updates["embedding_chunks_created"] = embedding_result.get(
+            "chunks_created", 0
+        )
+        updates["embedding_model"] = embedding_result.get("model")
+
+    _update_source_metadata(source, updates)
 
     try:
         db.commit()
@@ -350,6 +417,7 @@ def _process_one_source(
     source: SourceDocument,
     company_id: str,
     force: bool,
+    include_authorized_internal: bool = False,
 ) -> dict[str, Any]:
     source_id = source.id
 
@@ -360,12 +428,36 @@ def _process_one_source(
             "reason": "Source does not belong to this company.",
         }
 
+    if (
+        source.permission_status == "authorized_internal"
+        and not include_authorized_internal
+    ):
+        return {
+            "source_id": source_id,
+            "status": "skipped",
+            "reason": "Authorized internal sources require local access.",
+        }
+
     if source.permission_status not in ALLOWED_PERMISSION_STATUSES:
         return {
             "source_id": source_id,
             "status": "skipped",
             "reason": (
                 "Source permission status is not eligible for processing."
+            ),
+        }
+
+    metadata = source.source_metadata
+    if (
+        isinstance(metadata, dict)
+        and metadata.get("content_kind") == "search_snippet"
+    ):
+        return {
+            "source_id": source_id,
+            "status": "skipped",
+            "reason": (
+                "Search result snippets are discovery leads, not full "
+                "documents, and are excluded from AI ingestion."
             ),
         }
 
@@ -393,6 +485,7 @@ def _process_one_source(
         }
 
     failed_stage = "source_initialization"
+    embedding_result: dict[str, Any] | None = None
 
     try:
         source.processing_status = "processing"
@@ -417,6 +510,7 @@ def _process_one_source(
         embedding_result = embed_source(
             db,
             source_id,
+            include_authorized_internal=include_authorized_internal,
         )
 
         # Stage 2: Extract and validate product events.
@@ -427,10 +521,16 @@ def _process_one_source(
             source_id=source_id,
             company_id=company_id,
         )
+        extracted_knowledge_items = getattr(
+            extracted_events,
+            "knowledge_items",
+            [],
+        )
 
         new_event_count = 0
         linked_event_count = 0
         event_evidence = []
+        source_event_evidence = []
 
         # Stage 3: Persist events and source relationships.
         failed_stage = "event_persistence"
@@ -450,11 +550,43 @@ def _process_one_source(
                     event_data=event_data,
                 )
             )
+            source_event_evidence.append({
+                "event_id": event.id,
+                "event_title": event.title,
+                "event_date": event.event_date.isoformat() if event.event_date else None,
+                "evidence_classification": event.evidence_classification,
+                "extraction_confidence": event_data.get(
+                    "extraction_confidence"
+                ),
+                "evidence_quote": event_data.get("evidence_quote"),
+            })
 
             if created:
                 new_event_count += 1
             else:
                 linked_event_count += 1
+
+        new_knowledge_item_count = 0
+        linked_knowledge_item_count = 0
+        knowledge_item_evidence = []
+        failed_stage = "knowledge_item_persistence"
+        for item_data in extracted_knowledge_items:
+            item, created = _persist_knowledge_item(
+                db,
+                source,
+                item_data,
+            )
+            knowledge_item_evidence.append({
+                "knowledge_item_id": item.id,
+                "source_id": source_id,
+                "item_type": item.item_type,
+                "evidence_quote": item.evidence_quote,
+                "evidence_classification": item.evidence_classification,
+            })
+            if created:
+                new_knowledge_item_count += 1
+            else:
+                linked_knowledge_item_count += 1
 
         # Stage 4: Finalize source processing.
         failed_stage = "finalization"
@@ -477,8 +609,16 @@ def _process_one_source(
                 "ingestion_error": None,
                 "ingestion_failed_stage": None,
                 "extraction_event_count": len(extracted_events),
+                "extraction_knowledge_item_count": len(
+                    extracted_knowledge_items
+                ),
                 "new_event_count": new_event_count,
                 "linked_existing_event_count": linked_event_count,
+                "new_knowledge_item_count": new_knowledge_item_count,
+                "linked_existing_knowledge_item_count": (
+                    linked_knowledge_item_count
+                ),
+                "extracted_event_evidence": source_event_evidence,
                 "embedding_chunks_created": embedding_result[
                     "chunks_created"
                 ],
@@ -494,8 +634,14 @@ def _process_one_source(
             "events_extracted": len(extracted_events),
             "new_events": new_event_count,
             "existing_events_linked": linked_event_count,
+            "knowledge_items_extracted": len(extracted_knowledge_items),
+            "new_knowledge_items": new_knowledge_item_count,
+            "existing_knowledge_items_linked": (
+                linked_knowledge_item_count
+            ),
             "embedding": embedding_result,
             "event_evidence": event_evidence,
+            "knowledge_item_evidence": knowledge_item_evidence,
         }
 
     except Exception as exc:
@@ -510,6 +656,7 @@ def _process_one_source(
             source_id,
             exc,
             failed_stage,
+            embedding_result=embedding_result,
         )
 
         return {
@@ -517,6 +664,7 @@ def _process_one_source(
             "status": "failed",
             "failed_stage": failed_stage,
             "error": str(exc)[:1000],
+            "embedding": embedding_result,
         }
 
 def process_company_sources(
@@ -525,6 +673,7 @@ def process_company_sources(
     source_ids: list[str] | None = None,
     limit: int = DEFAULT_BATCH_SIZE,
     force: bool = False,
+    include_authorized_internal: bool = False,
 ) -> dict[str, Any]:
     """
     Process existing source documents for one company.
@@ -611,6 +760,7 @@ def process_company_sources(
             source=source,
             company_id=company_id,
             force=force,
+            include_authorized_internal=include_authorized_internal,
         )
         results.append(result)
 
@@ -621,6 +771,9 @@ def process_company_sources(
         "events_extracted": 0,
         "new_events": 0,
         "existing_events_linked": 0,
+        "knowledge_items_extracted": 0,
+        "new_knowledge_items": 0,
+        "existing_knowledge_items_linked": 0,
         "embedding_chunks_created": 0,
         "evidence_quotes_returned": 0,
     }
@@ -641,6 +794,18 @@ def process_company_sources(
         )
         counts["existing_events_linked"] += result.get(
             "existing_events_linked",
+            0,
+        )
+        counts["knowledge_items_extracted"] += result.get(
+            "knowledge_items_extracted",
+            0,
+        )
+        counts["new_knowledge_items"] += result.get(
+            "new_knowledge_items",
+            0,
+        )
+        counts["existing_knowledge_items_linked"] += result.get(
+            "existing_knowledge_items_linked",
             0,
         )
 
@@ -691,6 +856,11 @@ def get_company_ingestion_status(
         .filter(ProductEvent.company_id == company_id)
         .count()
     )
+    knowledge_items_count = (
+        db.query(KnowledgeItem)
+        .filter(KnowledgeItem.company_id == company_id)
+        .count()
+    )
 
     status_counts: dict[str, int] = {}
 
@@ -703,6 +873,7 @@ def get_company_ingestion_status(
         "company_name": company.name,
         "total_sources": len(sources),
         "total_events": events_count,
+        "total_knowledge_items": knowledge_items_count,
         "processing_status_counts": status_counts,
         "eligible_sources": sum(
             1

@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.core.local_access import require_local_internal_access
 from app.intelligence.ingestion import (
     get_company_ingestion_status,
     process_company_sources,
@@ -20,7 +21,9 @@ def process_company(
     ),
     limit: int = Query(default=25, ge=1, le=100),
     force: bool = Query(default=False),
+    include_authorized_internal: bool = Query(default=False),
     db: Session = Depends(get_db),
+    request: Request = None,
 ):
     """
     Process stored documents for a company.
@@ -36,6 +39,10 @@ def process_company(
     are processed. Set force=true to reprocess already processed
     sources as well.
     """
+    if include_authorized_internal:
+        if request is None:
+            raise HTTPException(status_code=403, detail="Authorized internal ingestion is only available through the trusted local API.")
+        require_local_internal_access(request)
     try:
         return process_company_sources(
             db=db,
@@ -43,6 +50,7 @@ def process_company(
             source_ids=source_ids,
             limit=limit,
             force=force,
+            include_authorized_internal=include_authorized_internal,
         )
 
     except ValueError as exc:

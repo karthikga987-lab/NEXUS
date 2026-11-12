@@ -6,8 +6,10 @@ import re
 import time
 import urllib.error
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 OLLAMA_URL = os.getenv(
@@ -36,8 +38,134 @@ EVENT_TYPES = {
     "other",
 }
 
+EVENT_EXTRACTION_OUTPUT_BUDGETS = (2048, 4096)
+
+KNOWLEDGE_ITEM_TYPES = {
+    "proposal",
+    "decision",
+    "concern",
+    "feedback",
+    "action_item",
+    "outcome",
+}
+KNOWLEDGE_ITEM_STATUSES = {
+    "proposed",
+    "approved",
+    "rejected",
+    "deferred",
+    "in_progress",
+    "completed",
+    "open",
+    "resolved",
+    "unknown",
+}
+KNOWLEDGE_EVIDENCE_CLASSIFICATIONS = {
+    "documented",
+    "supported",
+    "correlation",
+    "inference",
+    "unknown",
+}
+
 
 logger = logging.getLogger(__name__)
+
+
+class _FieldQuotes(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product_name: str
+    event_date: str | None = None
+    stated_reason: str | None = None
+    outcome_summary: str | None = None
+
+
+class _StructuredEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product_name: str
+    event_type: str
+    title: str
+    description: str | None = None
+    event_date: str | None = None
+    stated_reason: str | None = None
+    outcome_summary: str | None = None
+    extraction_confidence: float | None = None
+    evidence_quote: str
+    field_quotes: _FieldQuotes
+
+    @field_validator("event_type")
+    @classmethod
+    def event_type_must_be_allowed(cls, value: str) -> str:
+        if value not in EVENT_TYPES:
+            raise ValueError("Unsupported event type.")
+        return value
+
+
+class _StructuredKnowledgeItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_type: str
+    title: str
+    description: str
+    subject_name: str | None = None
+    actor: str | None = None
+    status: str = "unknown"
+    item_date: str | None = None
+    item_date_quote: str | None = None
+    evidence_quote: str
+    evidence_classification: str = "documented"
+    extraction_confidence: float | None = Field(
+        default=None, ge=0.0, le=1.0
+    )
+
+    @field_validator("item_type")
+    @classmethod
+    def item_type_must_be_allowed(cls, value: str) -> str:
+        if value not in KNOWLEDGE_ITEM_TYPES:
+            raise ValueError("Unsupported knowledge item type.")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def status_must_be_allowed(cls, value: str) -> str:
+        if value not in KNOWLEDGE_ITEM_STATUSES:
+            raise ValueError("Unsupported knowledge item status.")
+        return value
+
+    @field_validator("evidence_classification")
+    @classmethod
+    def evidence_classification_must_be_allowed(cls, value: str) -> str:
+        if value not in KNOWLEDGE_EVIDENCE_CLASSIFICATIONS:
+            raise ValueError("Unsupported knowledge evidence classification.")
+        return value
+
+
+class _StructuredExtraction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    events: list[_StructuredEvent]
+    knowledge_items: list[_StructuredKnowledgeItem] = Field(
+        default_factory=list
+    )
+
+
+def _parse_structured_json(content: str) -> dict[str, Any]:
+    """Parse plain or Markdown-fenced JSON returned by the local model."""
+    candidate = content.strip()
+    fenced = re.fullmatch(
+        r"```(?:json)?\s*(.*?)\s*```",
+        candidate,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if fenced:
+        candidate = fenced.group(1).strip()
+
+    parsed = json.loads(candidate)
+    if not isinstance(parsed, dict):
+        raise ExtractionError("Model returned an invalid JSON object.")
+
+    return _StructuredExtraction.model_validate(parsed).model_dump()
 
 
 EVENT_RESPONSE_SCHEMA = {
@@ -89,8 +217,52 @@ EVENT_RESPONSE_SCHEMA = {
                 "additionalProperties": False,
             },
         },
+        "knowledge_items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "item_type": {
+                        "type": "string",
+                        "enum": sorted(KNOWLEDGE_ITEM_TYPES),
+                    },
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "subject_name": {"type": ["string", "null"]},
+                    "actor": {"type": ["string", "null"]},
+                    "status": {
+                        "type": "string",
+                        "enum": sorted(KNOWLEDGE_ITEM_STATUSES),
+                    },
+                    "item_date": {"type": ["string", "null"]},
+                    "item_date_quote": {"type": ["string", "null"]},
+                    "evidence_quote": {"type": "string"},
+                    "evidence_classification": {
+                        "type": "string",
+                        "enum": sorted(KNOWLEDGE_EVIDENCE_CLASSIFICATIONS),
+                    },
+                    "extraction_confidence": {
+                        "type": ["number", "null"],
+                    },
+                },
+                "required": [
+                    "item_type",
+                    "title",
+                    "description",
+                    "subject_name",
+                    "actor",
+                    "status",
+                    "item_date",
+                    "item_date_quote",
+                    "evidence_quote",
+                    "evidence_classification",
+                    "extraction_confidence",
+                ],
+                "additionalProperties": False,
+            },
+        },
     },
-    "required": ["events"],
+    "required": ["events", "knowledge_items"],
     "additionalProperties": False,
 }
 
@@ -220,6 +392,7 @@ DATE RULES:
 36. Partial dates such as "June 2025" must produce null.
 37. Future plans are not completed events.
 38. If only the article publication date is available, return null.
+38a. For a strategic decision with both an approval date and a future effective or termination date, event_date is the approval date. Never use the future effective date as the decision date. If the decision date is not explicit, return null.
 
 REASON RULES:
 39. stated_reason must explain WHY the company made the decision
@@ -229,7 +402,10 @@ REASON RULES:
     a decision rationale by themselves.
 42. Only return a reason when the source explicitly expresses
     rationale, such as "because", "in response to", "to address",
-    or an equally clear explanation.
+    "to simplify",
+    or an equally clear explanation. For experiments, an explicit
+    hypothesis being tested (for example, "tested whether X would
+    improve Y") is the stated reason.
 43. The reason quotation must independently support the reason.
 44. The reason summary must accurately reflect that quotation.
 45. If no explicit rationale is present, return null.
@@ -305,7 +481,20 @@ product_launch, feature_launch, feature_change, feature_removal,
 pricing_change, experiment, strategic_decision, partnership,
 acquisition, market_entry, market_exit, incident, other.
 
-Return this structure:
+Also extract only non-event knowledge items explicitly stated in the source:
+proposal, decision, concern, feedback, action_item, or outcome. A public
+product description is not a proposal, decision, or outcome by itself. Do
+not duplicate an event as a knowledge item. Keep proposals separate from
+approved decisions and completed outcomes. Use status "unknown" when the
+source does not explicitly establish status. Use null for missing actor,
+subject, and dates. Every item needs an exact quotation from the source.
+Allowed evidence_classification values are documented, supported,
+correlation, inference, and unknown. Prefer documented for a direct source
+statement; do not treat this as independent proof that the statement is true.
+Confidence measures extraction support, not factual certainty.
+
+Return this structure with both arrays, using empty arrays when there are
+no qualifying records:
 {
   "events": [
     {
@@ -324,6 +513,21 @@ Return this structure:
         "stated_reason": null,
         "outcome_summary": "exact source quotation or null"
       }
+    }
+  ],
+  "knowledge_items": [
+    {
+      "item_type": "decision",
+      "title": "Exact-source-supported short title",
+      "description": "Concise explanation supported by the quotation",
+      "subject_name": null,
+      "actor": null,
+      "status": "unknown",
+      "item_date": null,
+      "item_date_quote": null,
+      "evidence_quote": "Exact quotation from the source",
+      "evidence_classification": "documented",
+      "extraction_confidence": 0.8
     }
   ]
 }
@@ -356,9 +560,11 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
                 "content": (
                     "Extract only distinct product events explicitly "
                     "supported by the source. Do not repeat events. "
-                    "Return exactly one JSON object with an events array. "
-                    "If there are no qualifying events, return "
-                    "{\"events\": []}.\n\n"
+                    "Return exactly one JSON object with events and "
+                    "knowledge_items arrays. Use an empty array for either "
+                    "category when no qualifying records are documented. "
+                    "If neither category is supported, return "
+                    "{\"events\": [], \"knowledge_items\": []}.\n\n"
                     "<SOURCE>\n"
                     + source_text
                     + "\n</SOURCE>"
@@ -369,11 +575,11 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
 
     last_error: Exception | None = None
 
-    for attempt in range(2):
+    for attempt, output_budget in enumerate(EVENT_EXTRACTION_OUTPUT_BUDGETS):
         request_payload = dict(payload)
         request_payload["options"] = {
             **payload["options"],
-            "num_predict": 2048 if attempt == 0 else 4096,
+            "num_predict": output_budget,
         }
 
         done_reason = "unavailable"
@@ -410,22 +616,13 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
                 )
 
             content_length = len(content)
-            parsed = json.loads(content)
-
-            if not isinstance(parsed, dict):
-                raise ExtractionError("Model returned an invalid JSON object.")
-
-            if not isinstance(parsed.get("events"), list):
-                keys = sorted(parsed.keys())
-                raise ExtractionError(
-                    "Model response must contain an events array; "
-                    f"received top-level keys: {keys}."
-                )
+            parsed = _parse_structured_json(content)
 
             if attempt > 0:
                 logger.info(
                     "Event extraction succeeded on retry with "
-                    "num_predict=4096 (done_reason=%s, response_chars=%s).",
+                    "num_predict=%s (done_reason=%s, response_chars=%s).",
+                    output_budget,
                     done_reason,
                     content_length,
                 )
@@ -433,16 +630,14 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
             return parsed
 
         except urllib.error.HTTPError as exc:
-            try:
-                body = exc.read().decode("utf-8", errors="replace")[:500]
-            except Exception:
-                body = ""
-
+            exc.close()
             last_error = ExtractionError(
-                f"Ollama returned HTTP {exc.code} at {OLLAMA_URL}. "
-                f"Response: {body or exc.reason}"
+                f"Ollama returned HTTP {exc.code} during event extraction."
             )
-            if attempt == 0 and exc.code in {500, 502, 503, 504}:
+            if (
+                attempt < len(EVENT_EXTRACTION_OUTPUT_BUDGETS) - 1
+                and exc.code in {500, 502, 503, 504}
+            ):
                 logger.warning(
                     "Ollama returned HTTP %s during event extraction; "
                     "retrying with a larger output budget.",
@@ -453,31 +648,37 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
             raise last_error from exc
 
         except urllib.error.URLError as exc:
-            last_error = ExtractionError(
-                f"Could not connect to Ollama at {OLLAMA_URL}: {exc}"
-            )
-            if attempt == 0:
+            last_error = ExtractionError("Could not connect to Ollama.")
+            if attempt < len(EVENT_EXTRACTION_OUTPUT_BUDGETS) - 1:
                 logger.warning(
                     "Ollama connection failed during event extraction; "
-                    "retrying once: %s",
+                    "retrying with output budget %s: %s",
+                    EVENT_EXTRACTION_OUTPUT_BUDGETS[attempt + 1],
                     exc,
                 )
                 time.sleep(2)
                 continue
             raise last_error from exc
 
-        except (json.JSONDecodeError, KeyError, TypeError, ExtractionError) as exc:
+        except (
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+            ExtractionError,
+            ValueError,
+        ) as exc:
             last_error = (
                 exc if isinstance(exc, ExtractionError)
                 else ExtractionError(
                     "Ollama returned an invalid extraction response."
                 )
             )
-            if attempt == 0:
+            if attempt < len(EVENT_EXTRACTION_OUTPUT_BUDGETS) - 1:
                 logger.warning(
-                    "Invalid event-extraction response; retrying with "
-                    "num_predict=4096 "
+                "Invalid event-extraction response; retrying with "
+                    "num_predict=%s "
                     "(done_reason=%s, response_chars=%s): %s",
+                    EVENT_EXTRACTION_OUTPUT_BUDGETS[attempt + 1],
                     done_reason,
                     content_length,
                     last_error,
@@ -565,10 +766,17 @@ def _normalize_event_type(
     Correct subscription-tier classification within an existing product.
     """
 
+    combined_text = f"{title} {evidence_quote}"
+
+    if re.search(
+        r"\b(?:approved|made)\s+(?:a\s+)?decision\b|\bdecision to\b",
+        combined_text,
+        flags=re.IGNORECASE,
+    ):
+        return "strategic_decision"
+
     if event_type != "feature_launch":
         return event_type
-
-    combined_text = f"{title} {evidence_quote}"
 
     subscription_patterns = (
         r"\bsubscription\s+(?:offering|plan|tier)\b",
@@ -585,6 +793,28 @@ def _normalize_event_type(
         return "feature_change"
 
     return event_type
+
+
+_EVENT_TYPE_EVIDENCE_PATTERNS = {
+    "product_launch": r"\b(?:launch(?:ed|es)?|introduc\w*|unveil\w*|debut\w*|release\w*|became available|made available)\b",
+    "feature_launch": r"\b(?:launch\w*|introduc\w*|add\w*|unveil\w*|became available|made available)\b",
+    "feature_change": r"\b(?:updat\w*|chang\w*|reformulat\w*|redesign\w*|expand\w*|replac\w*|add\w*|upgrad\w*)\b",
+    "feature_removal": r"\b(?:remov\w*|discontinu\w*|dropp\w*|retir\w*|end(?:ed)? support|no longer offer\w*)\b",
+    "pricing_change": r"\b(?:rais\w*|lower\w*|increas\w*|decreas\w*|chang\w*|reduc\w*|cut\w*)\b.{0,60}\b(?:price|pricing|cost|subscription|monthly|annual)\b|\b(?:price|pricing|cost)\b.{0,60}\b(?:rais\w*|lower\w*|increas\w*|decreas\w*|chang\w*|reduc\w*|cut\w*)\b",
+    "experiment": r"\b(?:experiment\w*|trial\w*|test\w*|pilot\w*)\b",
+    "strategic_decision": r"\b(?:approv\w*|decid\w*|decision|appoint\w*|named|ended support|exit\w*|withdraw\w*)\b",
+    "partnership": r"\b(?:partner\w*|collaborat\w*|alliance|joint venture|joined forces)\b",
+    "acquisition": r"\b(?:acquir\w*|acquisition|purchas\w*|bought|merg\w*)\b",
+    "market_entry": r"\b(?:enter\w*|launch\w*|roll\w* out|became available|started selling)\b",
+    "market_exit": r"\b(?:exit\w*|withdraw\w*|discontinu\w*|stopped selling|no longer available)\b",
+    "incident": r"\b(?:incident|outage|breach|recall|crash|failure|contamination|disruption|injur\w*|malfunction\w*)\b",
+}
+
+
+def _event_type_supported_by_quote(event_type: str, quote: str) -> bool:
+    """Require the cited excerpt to contain an action consistent with its type."""
+    pattern = _EVENT_TYPE_EVIDENCE_PATTERNS.get(event_type)
+    return pattern is None or bool(re.search(pattern, quote, flags=re.IGNORECASE))
 
 
 def _is_specific_outcome(
@@ -743,6 +973,20 @@ def _completed_event_quote_fragment(
         "has introduced",
         "introduced",
         "introduces",
+        "removed",
+        "discontinued",
+        "reformulated",
+        "reformulation",
+        "raised",
+        "increased",
+        "decreased",
+        "conducted",
+        "ran an experiment",
+        "approved",
+        "decided to",
+        "ended support",
+        "cancelled",
+        "canceled",
         "announced the launch",
         "announced the release",
         "announced the introduction",
@@ -948,6 +1192,7 @@ def _is_explicit_reason_quote(
         "in order to",
         "to address",
         "to solve",
+        "to simplify",
         "to improve",
         "to reduce",
         "to increase",
@@ -959,6 +1204,8 @@ def _is_explicit_reason_quote(
         "the reason",
         "responding to",
         "as a result of",
+        "tested whether",
+        "test whether",
     )
 
     return any(
@@ -992,6 +1239,17 @@ def validate_extracted_event(
         source_text,
     )
 
+    field_quotes = event.get("field_quotes")
+    if evidence_quote is None and isinstance(field_quotes, dict):
+        # Models sometimes concatenate two exact but non-contiguous source
+        # sentences. Recover only from the exact product field quotation,
+        # and only if that quotation independently proves the completed
+        # event. No wording is synthesized here.
+        evidence_quote = _completed_event_quote_fragment(
+            field_quotes.get("product_name"),
+            source_text,
+        )
+
     # Some company pages put the completed action in an announcement
     # headline while the model selects the descriptive sentence below it.
     # Accept the headline only when it is itself an exact source substring
@@ -1024,7 +1282,8 @@ def validate_extracted_event(
         evidence_quote=evidence_quote,
     )
 
-    field_quotes = event.get("field_quotes")
+    if not _event_type_supported_by_quote(event_type, evidence_quote):
+        return None
 
     if not isinstance(field_quotes, dict):
         return None
@@ -1110,6 +1369,121 @@ def validate_extracted_event(
     }
 
 
+def validate_extracted_knowledge_item(
+    item: dict[str, Any],
+    source_text: str,
+    source_id: str,
+    company_id: str,
+) -> dict[str, Any] | None:
+    """Keep only knowledge records whose exact quotation and summary agree."""
+    if not isinstance(item, dict):
+        return None
+
+    item_type = item.get("item_type")
+    title = item.get("title")
+    description = item.get("description")
+    quote = item.get("evidence_quote")
+
+    if (
+        item_type not in KNOWLEDGE_ITEM_TYPES
+        or not isinstance(title, str)
+        or not title.strip()
+        or not isinstance(description, str)
+        or not description.strip()
+        or not _is_exact_quote(quote, source_text)
+        or not _is_supported_by_quote(title, quote, source_text)
+        or not _is_supported_by_quote(description, quote, source_text)
+    ):
+        return None
+
+    status = item.get("status", "unknown")
+    if status not in KNOWLEDGE_ITEM_STATUSES:
+        status = "unknown"
+
+    status_cues = {
+        "proposed": ("propos", "suggest", "recommend", "plan to", "idea"),
+        "approved": ("approv", "authorized", "agreed to", "accepted"),
+        "rejected": ("reject", "declined", "not approved"),
+        "deferred": ("defer", "postpon", "delay", "revisit later"),
+        "in_progress": ("in progress", "underway", "working on", "began"),
+        "completed": ("completed", "finished", "implemented", "achieved"),
+        "resolved": ("resolved", "fixed", "addressed", "closed"),
+        "open": ("open", "unresolved", "outstanding"),
+    }
+    if status != "unknown" and not any(
+        cue in quote.casefold()
+        for cue in status_cues.get(status, ())
+    ):
+        status = "unknown"
+
+    evidence_classification = item.get(
+        "evidence_classification", "documented"
+    )
+    if evidence_classification not in KNOWLEDGE_EVIDENCE_CLASSIFICATIONS:
+        evidence_classification = "unknown"
+
+    confidence = item.get("extraction_confidence")
+    try:
+        confidence = float(confidence) if confidence is not None else None
+        if confidence is not None and not 0.0 <= confidence <= 1.0:
+            confidence = None
+    except (TypeError, ValueError):
+        confidence = None
+
+    subject_name = item.get("subject_name")
+    if not isinstance(subject_name, str) or subject_name.casefold() not in quote.casefold():
+        subject_name = None
+
+    actor = item.get("actor")
+    if not isinstance(actor, str) or actor.casefold() not in quote.casefold():
+        actor = None
+
+    item_date = None
+    requested_date = item.get("item_date")
+    item_date_quote = item.get("item_date_quote")
+    quoted_date = (
+        _date_from_quote(item_date_quote)
+        if _is_exact_quote(item_date_quote, source_text)
+        and item_date_quote in quote
+        else None
+    )
+    if requested_date and quoted_date:
+        try:
+            parsed_requested_date = date.fromisoformat(str(requested_date))
+        except ValueError:
+            parsed_requested_date = None
+        if parsed_requested_date == quoted_date:
+            item_date = datetime(
+                quoted_date.year,
+                quoted_date.month,
+                quoted_date.day,
+                tzinfo=timezone.utc,
+            )
+
+    return {
+        "company_id": company_id,
+        "source_id": source_id,
+        "item_type": item_type,
+        "title": title.strip()[:500],
+        "description": description.strip(),
+        "subject_name": subject_name,
+        "actor": actor,
+        "status": status,
+        "item_date": item_date,
+        "evidence_quote": quote,
+        "evidence_classification": evidence_classification,
+        "extraction_confidence": confidence,
+    }
+
+
+class DocumentExtraction(list):
+    """List-compatible event result carrying additional extracted knowledge."""
+
+    def __init__(self, events, knowledge_items):
+        super().__init__(events)
+        self.knowledge_items = knowledge_items
+
+
 def extract_events(
     source_text: str,
     source_id: str,
@@ -1148,4 +1522,24 @@ def extract_events(
         if validated is not None:
             validated_events.append(validated)
 
-    return validated_events
+    raw_knowledge_items = result.get("knowledge_items", [])
+    if not isinstance(raw_knowledge_items, list):
+        raise ExtractionError(
+            "The model did not return a knowledge_items array."
+        )
+
+    validated_knowledge_items = []
+    for item in raw_knowledge_items:
+        validated = validate_extracted_knowledge_item(
+            item=item,
+            source_text=source_text,
+            source_id=source_id,
+            company_id=company_id,
+        )
+        if validated is not None:
+            validated_knowledge_items.append(validated)
+
+    return DocumentExtraction(
+        validated_events,
+        validated_knowledge_items,
+    )

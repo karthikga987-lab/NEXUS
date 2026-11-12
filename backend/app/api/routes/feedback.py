@@ -1,30 +1,264 @@
+
+from collections import Counter
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+
+from app.feedback.analyzer import analyze_feedback
+from app.feedback.csv_upload import router as csv_upload_router
 from app.db.session import get_db
 from app.models import Company, Feedback
+from app.models.entities import feedback_topics
 from app.schemas.contracts import FeedbackCreate
 
+
 router = APIRouter()
+router.include_router(csv_upload_router)
+
 
 @router.post("", status_code=201)
-def create_feedback(payload: FeedbackCreate, db: Session = Depends(get_db)):
-    if not db.get(Company, payload.company_id):
-        raise HTTPException(status_code=404, detail="Company not found")
-    item = Feedback(**payload.model_dump())
-    db.add(item)
-    db.commit()
-    db.refresh(item)
-    return {"id": item.id, "status": "stored"}
+def create_feedback(
+    payload: FeedbackCreate,
+    db: Session = Depends(get_db),
+):
+    company = db.get(Company, payload.company_id)
 
-@router.get("/analysis/{company_id}")
-def feedback_analysis(company_id: str, db: Session = Depends(get_db)):
-    if not db.get(Company, company_id):
-        raise HTTPException(status_code=404, detail="Company not found")
-    items = db.query(Feedback).filter_by(company_id=company_id).all()
-    # Member 4 replaces this summary with validated sentiment/topic analysis.
+    if company is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Company not found",
+        )
+
+    analysis = analyze_feedback(payload.text)
+
+    item = Feedback(
+        company_id=payload.company_id,
+        feedback_text=payload.text,
+        product_name=payload.product_name,
+        source_url=payload.source_url,
+        rating=payload.rating,
+        created_at_source=payload.feedback_date,
+        sentiment=analysis["sentiment"],
+        feedback_type=analysis["feedback_type"],
+        analysis_status="completed",
+    )
+
+    try:
+        db.add(item)
+        db.flush()
+
+        for topic in analysis["topics"]:
+            db.execute(
+                feedback_topics.insert().values(
+                    feedback_id=item.id,
+                    topic=topic,
+                )
+            )
+
+        db.commit()
+        db.refresh(item)
+
+    except Exception:
+        db.rollback()
+        raise
+
+    return {
+        "id": item.id,
+        "status": "stored",
+        "sentiment": item.sentiment,
+        "topics": analysis["topics"],
+        "feedback_type": item.feedback_type,
+    }
+
+
+@router.post("/reanalyze/{company_id}")
+def reanalyze_feedback(
+    company_id: str,
+    db: Session = Depends(get_db),
+):
+    if db.get(Company, company_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Company not found",
+        )
+
+    items = (
+        db.query(Feedback)
+        .filter(Feedback.company_id == company_id)
+        .all()
+    )
+
+    updated = 0
+
+    try:
+        for item in items:
+            analysis = analyze_feedback(item.feedback_text or "")
+
+            item.sentiment = analysis["sentiment"]
+            item.feedback_type = analysis["feedback_type"]
+            item.analysis_status = "completed"
+
+            db.execute(
+                feedback_topics.delete().where(
+                    feedback_topics.c.feedback_id == item.id
+                )
+            )
+
+            for topic in analysis["topics"]:
+                db.execute(
+                    feedback_topics.insert().values(
+                        feedback_id=item.id,
+                        topic=topic,
+                    )
+                )
+
+            updated += 1
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
+
     return {
         "company_id": company_id,
         "total_feedback": len(items),
-        "analysis_status": "not_implemented",
-        "message": "Sentiment and topic analysis are placeholders."
+        "updated": updated,
+        "status": "completed",
+        "message": "Feedback sentiment, type, and topics re-analyzed successfully.",
+    }
+
+
+@router.get("/analysis/{company_id}")
+def feedback_analysis(
+    company_id: str,
+    db: Session = Depends(get_db),
+):
+    if db.get(Company, company_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Company not found",
+        )
+
+    items = (
+        db.query(Feedback)
+        .filter(Feedback.company_id == company_id)
+        .all()
+    )
+
+    sentiment_counts = Counter(
+        item.sentiment or "unknown"
+        for item in items
+    )
+
+    topic_rows = (
+        db.execute(
+            feedback_topics.select().where(
+                feedback_topics.c.feedback_id.in_(
+                    [item.id for item in items]
+                )
+            )
+        ).all()
+        if items else []
+    )
+
+    topic_counts = Counter(
+        row.topic for row in topic_rows
+    )
+
+    return {
+        "company_id": company_id,
+        "total_feedback": len(items),
+        "sentiment_distribution": dict(sentiment_counts),
+        "topic_distribution": dict(topic_counts),
+        "analysis_status": "completed",
+    }
+
+
+@router.get("/trends/{company_id}")
+def feedback_trends(
+    company_id: str,
+    db: Session = Depends(get_db),
+):
+    if db.get(Company, company_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Company not found",
+        )
+
+    items = (
+        db.query(Feedback)
+        .filter(Feedback.company_id == company_id)
+        .all()
+    )
+
+    if not items:
+        return {
+            "company_id": company_id,
+            "total_feedback": 0,
+            "trends": [],
+        }
+
+    topic_rows = db.execute(
+        feedback_topics.select().where(
+            feedback_topics.c.feedback_id.in_(
+                [item.id for item in items]
+            )
+        )
+    ).all()
+
+    feedback_by_id = {
+        item.id: item for item in items
+    }
+
+    trends = {}
+
+    for row in topic_rows:
+        item = feedback_by_id.get(row.feedback_id)
+
+        if item is None:
+            continue
+
+        topic = row.topic
+
+        if topic not in trends:
+            trends[topic] = {
+                "topic": topic,
+                "total_feedback": 0,
+                "sentiments": {
+                    "positive": 0,
+                    "negative": 0,
+                    "mixed": 0,
+                    "neutral": 0,
+                    "unknown": 0,
+                },
+                "evidence": [],
+            }
+
+        trends[topic]["total_feedback"] += 1
+
+        sentiment = item.sentiment or "unknown"
+
+        trends[topic]["sentiments"].setdefault(
+            sentiment, 0
+        )
+        trends[topic]["sentiments"][sentiment] += 1
+
+        trends[topic]["evidence"].append({
+            "feedback_id": item.id,
+            "feedback_text": item.feedback_text,
+            "sentiment": sentiment,
+            "rating": item.rating,
+            "source_url": item.source_url,
+            "source_id": item.source_id,
+        })
+
+    return {
+        "company_id": company_id,
+        "total_feedback": len(items),
+        "trends": sorted(
+            trends.values(),
+            key=lambda item: item["total_feedback"],
+            reverse=True,
+        ),
     }

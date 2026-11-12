@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import urllib.error
 import urllib.request
 from typing import Any
@@ -56,6 +57,19 @@ ALLOWED_PERMISSION_STATUSES = {
     "public",
     "authorized_internal",
 }
+
+_CAUSAL_RELATIONSHIP_TYPES = {
+    "MOTIVATED_BY",
+    "RESULTED_IN",
+    "CHANGED_BECAUSE_OF",
+}
+_EXPLICIT_CAUSAL_LANGUAGE = re.compile(
+    r"\b(?:because|due\s+to|in\s+response\s+to|motivated\s+by|"
+    r"caused\s+by|resulted\s+in|led\s+to|triggered\s+by|prompted\s+by|"
+    r"driven\s+by|as\s+a\s+result\s+of|designed\s+to|to\s+address|"
+    r"to\s+improve|to\s+help)\b",
+    re.IGNORECASE,
+)
 
 
 class RelationshipExtractionError(Exception):
@@ -336,6 +350,12 @@ def validate_relationship_candidate(
 
     if quote not in source_text:
         return None, "supporting_quote_not_found_exactly"
+
+    if (
+        relation_type in _CAUSAL_RELATIONSHIP_TYPES
+        or evidence_status == "documented_cause"
+    ) and not _EXPLICIT_CAUSAL_LANGUAGE.search(quote):
+        return None, "causal_relationship_not_explicit"
 
     confidence = candidate.get("confidence")
 

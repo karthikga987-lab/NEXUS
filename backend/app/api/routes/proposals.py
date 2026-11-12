@@ -1,14 +1,16 @@
-﻿
+
 import logging
 import os
 import re
+import time
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
+from app.core.local_access import require_local_internal_access
 from app.models import Company, Proposal, SourceDocument
 from app.models.entities import (
     ProposalAnalysis,
@@ -23,10 +25,13 @@ from app.intelligence.embeddings import (
     search_similar_chunks,
     search_external_public_chunks,
 )
+from app.intelligence.knowledge_retrieval import append_relevant_knowledge_item_passages
 from app.intelligence.proposal_analysis import (
     ProposalAnalysisError,
     analyze_proposal_with_evidence,
 )
+
+from app.research.competitors import discover_and_ingest_competitors
 
 from app.knowledge_graph.builder import build_company_graph
 from app.knowledge_graph.traversal import (
@@ -35,7 +40,7 @@ from app.knowledge_graph.traversal import (
 )
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 
 PROPOSAL_INTERNAL_MIN_SIMILARITY = float(
     os.getenv("NEXUS_PROPOSAL_INTERNAL_MIN_SIMILARITY", "0.70")
@@ -254,6 +259,7 @@ def _format_evidence(
         "evidence_scope": scope,
         "permission_status": item.get("permission_status"),
         "evidence_classification": "unknown",
+        "evidence_origin": item.get("evidence_origin"),
     }
 
 
@@ -319,6 +325,7 @@ def _get_proposal_relevant_feedback(
 def analyze_proposal(
     payload: ProposalAnalyzeIn,
     db: Session = Depends(get_db),
+    request: Request = None,
 ):
     company = db.get(Company, payload.company_id)
 
@@ -327,6 +334,13 @@ def analyze_proposal(
             status_code=404,
             detail="Company not found",
         )
+
+    if payload.include_authorized_internal:
+        if request is None:
+            raise HTTPException(status_code=403, detail="Authorized internal evidence is only available through the trusted local API.")
+        require_local_internal_access(request)
+
+    request_started = time.perf_counter()
 
     try:
         proposal = Proposal(
@@ -339,14 +353,22 @@ def analyze_proposal(
         db.add(proposal)
         db.flush()
 
+        # Persist the submitted proposal before starting independent
+        # research. This releases SQLite's write transaction before
+        # the competitor session attempts to write.
+        db.commit()
+
         query = f"{payload.title}\n{payload.description}"
 
         # Retrieve internal historical document chunks.
+        stage_started = time.perf_counter()
+
         internal_evidence = search_similar_chunks(
             db=db,
             query=query,
             company_id=payload.company_id,
             limit=20,
+            include_authorized_internal=payload.include_authorized_internal,
         )
 
         # Apply proposal-specific similarity threshold.
@@ -365,12 +387,131 @@ def analyze_proposal(
                 PROPOSAL_INTERNAL_MIN_SIMILARITY,
             )
 
-        # Retrieve public evidence from other companies.
+        logger.info(
+            "Proposal timing | internal_retrieval=%.2fs",
+            time.perf_counter() - stage_started,
+        )
+
+        external_research = {
+            "status": "unavailable",
+            "requested": payload.include_fresh_external_research,
+            "evidence_origin": "unavailable",
+            "companies_discovered": 0,
+            "companies_processed": 0,
+            "sources_collected": 0,
+            "sources_processed": 0,
+            "cached_results_used": 0,
+            "errors": [],
+            "companies": [],
+        }
+
+        # Use eligible cached evidence immediately by default. Fresh public
+        # competitor research is an explicit opt-in and is bounded by the
+        # existing search/fetch timeouts.
+        stage_started = time.perf_counter()
         external_evidence = search_external_public_chunks(
             db=db,
             query=query,
             exclude_company_id=payload.company_id,
             limit=12,
+        )
+
+        cached_source_ids = {
+            item.get("source_id")
+            for item in external_evidence
+            if item.get("source_id")
+        }
+
+        if payload.include_fresh_external_research:
+            competitor_db = SessionLocal()
+            try:
+                competitor_company = competitor_db.get(
+                    Company,
+                    payload.company_id,
+                )
+                if competitor_company is None:
+                    raise ValueError(
+                        "Proposal company was not found in the research session."
+                    )
+
+                external_research = discover_and_ingest_competitors(
+                    db=competitor_db,
+                    proposal_company=competitor_company,
+                    proposal_title=payload.title,
+                    proposal_description=payload.description,
+                )
+                external_research["requested"] = True
+            except Exception as exc:
+                logger.exception("External competitor research failed")
+                try:
+                    competitor_db.rollback()
+                except Exception:
+                    logger.exception(
+                        "Could not roll back competitor research session"
+                    )
+                external_research["status"] = "failed"
+                external_research["requested"] = True
+                external_research["errors"] = [str(exc)[:250]]
+            finally:
+                competitor_db.close()
+
+            logger.info(
+                "Proposal timing | competitor_research=%.2fs",
+                time.perf_counter() - stage_started,
+            )
+
+            # Requery after collection. If search/embedding fails, cached
+            # results remain usable for the current partial analysis.
+            try:
+                external_evidence = search_external_public_chunks(
+                    db=db,
+                    query=query,
+                    exclude_company_id=payload.company_id,
+                    limit=12,
+                )
+            except EmbeddingError:
+                if not external_evidence:
+                    raise
+
+            new_source_ids = {
+                item.get("source_id")
+                for item in external_evidence
+                if item.get("source_id") not in cached_source_ids
+            }
+            for item in external_evidence:
+                item["evidence_origin"] = (
+                    "newly_collected"
+                    if item.get("source_id") in new_source_ids
+                    else "cached"
+                )
+            external_research["cached_results_used"] = sum(
+                item.get("evidence_origin") == "cached"
+                for item in external_evidence
+            )
+            if new_source_ids:
+                external_research["evidence_origin"] = (
+                    "cached_and_new" if cached_source_ids else "newly_collected"
+                )
+            elif external_evidence:
+                external_research["evidence_origin"] = "cached"
+            else:
+                external_research["evidence_origin"] = "unavailable"
+        else:
+            external_research["status"] = (
+                "cached_only" if external_evidence else "unavailable"
+            )
+            external_research["evidence_origin"] = (
+                "cached" if external_evidence else "unavailable"
+            )
+            external_research["cached_results_used"] = len(external_evidence)
+            for item in external_evidence:
+                item["evidence_origin"] = "cached"
+
+        logger.info(
+            "Proposal timing | external_evidence_retrieval=%.2fs "
+            "(results=%s)",
+            time.perf_counter() - stage_started,
+            len(external_evidence),
         )
 
         # Enrich internal evidence with provenance and permissions.
@@ -382,17 +523,44 @@ def analyze_proposal(
 
             if source is not None:
                 item["permission_status"] = source.permission_status
+                item["evidence_scope"] = (
+                    "authorized_internal"
+                    if source.permission_status == "authorized_internal"
+                    else "public_company"
+                )
+                metadata = source.source_metadata if isinstance(source.source_metadata, dict) else {}
+                item["evidence_origin"] = metadata.get(
+                    "evidence_origin",
+                    "authorized_internal" if source.permission_status == "authorized_internal" else "public_company",
+                )
 
         for item in external_evidence:
             item["proposing_company_id"] = payload.company_id
 
+        internal_evidence = append_relevant_knowledge_item_passages(
+            db,
+            company_id=payload.company_id,
+            query=query,
+            retrieved_passages=internal_evidence,
+            include_authorized_internal=payload.include_authorized_internal,
+        )
+
         # Build supplementary historical knowledge graph context.
+        stage_started = time.perf_counter()
+
         graph_context = _build_company_graph_context(
             db=db,
             company_id=payload.company_id,
         )
 
+        logger.info(
+            "Proposal timing | graph_retrieval=%.2fs",
+            time.perf_counter() - stage_started,
+        )
+
         # Retrieve customer feedback separately from documentary evidence.
+        stage_started = time.perf_counter()
+
         customer_feedback = _get_customer_feedback(
             db=db,
             company_id=payload.company_id,
@@ -405,20 +573,38 @@ def analyze_proposal(
             proposal_description=payload.description,
         )
 
+        logger.info(
+            "Proposal timing | feedback_retrieval_and_filtering=%.2fs "
+            "(total=%s, relevant=%s)",
+            time.perf_counter() - stage_started,
+            len(customer_feedback),
+            len(relevant_customer_feedback),
+        )
+
         # Run AI proposal analysis.
+        stage_started = time.perf_counter()
+
         analysis_result = analyze_proposal_with_evidence(
             title=payload.title,
             description=payload.description,
             evidence_chunks=internal_evidence,
             external_evidence_chunks=external_evidence,
             graph_context=graph_context,
-            customer_feedback=customer_feedback,
+            customer_feedback=relevant_customer_feedback,
+            proposing_company_name=company.name,
+        )
+
+        logger.info(
+            "Proposal timing | ai_analysis=%.2fs",
+            time.perf_counter() - stage_started,
         )
 
         # Obtain independently accepted documentary source IDs.
-        eligible_internal_ids = _get_eligible_source_ids(
-            analysis_result,
-            "internal",
+        eligible_internal_ids = set().union(
+            _get_eligible_source_ids(analysis_result, "internal"),
+            _get_eligible_source_ids(analysis_result, "public_company"),
+            _get_eligible_source_ids(analysis_result, "authorized_internal"),
+            _get_eligible_source_ids(analysis_result, "company"),
         )
 
         eligible_external_ids = _get_eligible_source_ids(
@@ -502,9 +688,34 @@ def analyze_proposal(
 
         limitations = list(analysis_result["limitations"])
 
+        if external_research["status"] == "cached_only":
+            limitations.append(
+                "Fresh external research was not requested; analysis uses "
+                "only relevant public evidence already stored in NEXUS."
+            )
+        elif external_research["status"] == "unavailable":
+            limitations.append(
+                "No relevant cached external public evidence was available. "
+                "Fresh external research was not requested."
+            )
+        elif external_research["status"] not in {"completed", "partial"}:
+            limitations.append(
+                "Fresh external public research did not complete; any "
+                "eligible cached evidence remains available for this analysis."
+            )
+
+        if (
+            payload.include_fresh_external_research
+            and external_research.get("companies_processed", 0) == 0
+        ):
+            limitations.append(
+                "No new external companies were successfully processed "
+                "during this proposal analysis."
+            )
+
         if not internal_evidence:
             limitations.append(
-                "No internal documentary passages met the proposal "
+                "No same-company documentary passages met the proposal "
                 f"similarity threshold of "
                 f"{PROPOSAL_INTERNAL_MIN_SIMILARITY:.2f}."
             )
@@ -538,6 +749,8 @@ def analyze_proposal(
             )
 
         # Persist the final analysis.
+        stage_started = time.perf_counter()
+
         analysis = ProposalAnalysis(
             proposal_id=proposal.id,
             status=analysis_result["status"],
@@ -578,8 +791,20 @@ def analyze_proposal(
 
         db.commit()
 
+        logger.info(
+            "Proposal timing | finalization_and_persistence=%.2fs",
+            time.perf_counter() - stage_started,
+        )
+
+        logger.info(
+            "Proposal timing | total_until_commit=%.2fs "
+            "(proposal_id=%s)",
+            time.perf_counter() - request_started,
+            proposal.id,
+        )
+
         internal_response = [
-            _format_evidence(item, "internal")
+            _format_evidence(item, item.get("evidence_scope", "public_company"))
             for item in internal_evidence
         ]
 
@@ -598,6 +823,7 @@ def analyze_proposal(
             "claims": analysis_result.get("claims", []),
             "internal_evidence": internal_response,
             "external_evidence": external_response,
+            "external_research": external_research,
             "customer_feedback_context": {
                 "feedback_count": len(relevant_customer_feedback),
                 "total_company_feedback_available": len(
@@ -670,6 +896,14 @@ def get_proposal_analysis(
         .filter(AnalysisEvidence.analysis_id == analysis.id)
         .all()
     )
+
+    # The API has no authentication layer, so a saved analysis backed by
+    # non-public documents must not be returned through this public route.
+    if any(source.permission_status != "public" for _, source, _ in evidence_rows):
+        raise HTTPException(
+            status_code=404,
+            detail="Proposal analysis not found",
+        )
 
     claims_by_statement = {}
 
