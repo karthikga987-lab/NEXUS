@@ -213,3 +213,31 @@ This section records the state before Member 1 frontend recovery and is supersed
 - `git diff --cached --check`: passed after reviewing the explicit staged file list. No databases, secrets, backups, `node_modules`, or `frontend/dist` files were staged.
 - Interactive browser/device click-through was not completed because the computer-use browser tool stopped when it could not establish the active URL. Manual smoke testing of the file picker, responsive layout, chatbot and proposal form remains required before a public demo. Keep the local internal-source endpoint loopback-only; the project does not have production authentication/authorization.
 - The live local workflow validates API and model integration with synthetic content; it does not establish real-company extraction quality, fresh research coverage, or production security.
+
+## Latest Member 1 Frontend Update (947138e)
+
+### Review and integration
+
+- Fetched `origin/feature/frontend`; it points to `947138e095f8e578a95784cc70ad0e74acfa58ff`, one commit after the previously integrated frontend commit `68d71d2da0100bc34aef9f1dfdf2d18bae7f6edd`. The upstream change contains 15 frontend files (5,181 insertions, 564 deletions). The integration branch was `feature/ai-intelligence` at `33abd27b34832194e17101597a707c34226c7b0e` before this merge.
+- Reviewed the full file list and the changed React components, entry point, styles, and new canvas background. The incoming dashboard/timeline/source/customer/graph/proposal implementations contain illustrative sample records and placeholder “not integrated” states. Those records were not carried into the integrated UI.
+- Resolved overlapping changes in `CompanyDashboard.css`, `CustomerIntelligence.jsx`, `KnowledgeGraph.jsx`, `ProductTimeline.jsx`, `ProposalAnalysis.jsx`, `ResearchSources.jsx`, and `styles.css`. The current real API orchestration and response handling were preserved. The updated visual CSS, `CosmicBackground` component, and main entry wrapper were integrated; dynamic summary cards use actual returned counts.
+
+### API compatibility
+
+- The company dashboard still uses the existing company detail, events, sources, research statistics, ingestion status, feedback analysis/trends, KnowledgeItems, graph, research, ingestion, and internal-source routes.
+- The source page retains research, ingestion, source provenance, and loopback-guarded local document import. The timeline uses returned ProductEvents and linked source references. Feedback analytics use actual feedback trends/distributions, with heuristic limitations disclosed. The graph renders only API-returned nodes/edges and retains edge provenance details. Proposal analysis still submits through the existing proposal API and shows returned evidence, claims, feedback context, risks and limitations. The assistant/RAG and API base URL were not changed.
+- No backend route, API contract, shared data contract, ORM schema, migration, or database was changed in this integration.
+
+### Verification
+
+- Backend root suite: **199 passed, 0 failed, 0 skipped in 16.42 seconds**. Backend-directory suite: **199 passed, 0 failed, 0 skipped in 16.42 seconds**. Each used a separate temporary SQLite URL; each emitted the same upstream Starlette/anyio deprecation warning.
+- Frontend production build: **passed**, Vite 8.3.6, 2,079 modules, **203 ms**.
+- API health: `GET /health` returned **200** (`status=ok`). CORS preflight for `http://127.0.0.1:5173` returned **200** with the matching allow-origin.
+- Direct Vite HTTP check: **11/11** paths returned HTTP 200, covering the page, main entry, App, styles, cosmic background, dashboard, and all six connected feature pages.
+- `frontend/package.json` provides `dev`, `build`, and `preview` only; no lint or typecheck script is configured. Playwright/Puppeteer and Chrome/Edge command-line browsers were unavailable in the environment.
+- No interactive or headless browser click-through is claimed. Manual visual/responsive smoke testing remains outstanding.
+- A pre-fetch SHA-256 manifest recorded the 67 preexisting untracked paths. After integration all 67 paths and file SHA-256 values matched; they remain unstaged. No backup/evaluation artifacts, databases, secrets, `node_modules`, or `frontend/dist` output are staged.
+
+### Remaining demo limitations
+
+The UI uses real backend responses but this pass did not run live company research or model inference. The previous local synthetic workflow remains the evidence for those paths. CSV feedback upload remains backend-only in the UI; proposal history has no list page; internal-source routes remain loopback-only development functionality without production authentication. Readiness remains **PARTIALLY READY** until a manual browser smoke test and supervised local demo are completed.

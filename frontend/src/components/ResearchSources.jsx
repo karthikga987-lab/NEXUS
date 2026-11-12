@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
+import "./ResearchSources.css";
 import {
   Search, FileText, Globe, Newspaper, BookOpen, CalendarDays,
-  ExternalLink, RefreshCw, LoaderCircle, Upload, ShieldCheck,
+  ExternalLink, RefreshCw, LoaderCircle, Upload, ShieldCheck, Activity, Tags,
 } from 'lucide-react';
 
 function formatDate(value) {
@@ -44,6 +45,8 @@ export default function ResearchSources({
   }), [sources, search, activeType]);
   const counts = stats?.latest_run?.counts || {};
   const ingestionCounts = ingestion?.processing_status_counts || {};
+  const totalReports = (sources || []).filter((source) => String(source.source_type || "").toLowerCase().includes("report")).length;
+  const totalTypes = new Set((sources || []).map((source) => source.source_type).filter(Boolean)).size;
 
   function handleFile(event) {
     const file = event.target.files?.[0];
@@ -53,6 +56,11 @@ export default function ResearchSources({
 
   return (
     <div className="sources-page">
+      <div className="sources-summary" aria-label="Saved source summary">
+        <div className="sources-summary-card"><span><Activity size={14} />Total sources</span><strong>{sources == null ? "—" : sources.length}</strong></div>
+        <div className="sources-summary-card"><span><BookOpen size={14} />Reports</span><strong>{sources == null ? "—" : totalReports}</strong></div>
+        <div className="sources-summary-card"><span><Tags size={14} />Source types</span><strong>{sources == null ? "—" : totalTypes}</strong></div>
+      </div>
       <section className="research-controls" aria-label="Company research actions">
         <div>
           <h2>Collect company sources</h2>

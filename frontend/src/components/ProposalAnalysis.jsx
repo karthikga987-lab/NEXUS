@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Search, Lightbulb, CheckCircle2, AlertTriangle, X, Sparkles, ExternalLink, LoaderCircle } from 'lucide-react';
 import { api } from '../api/client';
+import './ProposalAnalysis.css';
 
 function EvidenceCard({ item }) {
   return <article className="proposal-evidence-card">
@@ -47,9 +48,16 @@ export default function ProposalAnalysis({ company }) {
     ...(analysis?.external_evidence || []),
   ];
   const sourceById = new Map(evidence.map((item) => [item.source_id, item]));
+  const feedbackCount = analysis?.customer_feedback_context?.feedback_count;
 
   return (
     <div className="proposal-page">
+      <header className="proposal-heading"><div><span className="proposal-eyebrow">PROPOSAL EVALUATION</span><h2>Evidence-backed analysis</h2><p>Analyze a proposal against eligible company history and feedback returned by the backend.</p></div><span className="proposal-demo-label"><span className="score-status">{analysis?.status || "No analysis submitted"}</span></span></header>
+      <section className="proposal-summary" aria-label="Current analysis summary">
+        <article className="proposal-summary-card"><div className="proposal-summary-top"><span>Evidence passages</span><Search size={15} /></div><h2>{analysis ? evidence.length : "—"}</h2><p>Returned for this request</p></article>
+        <article className="proposal-summary-card"><div className="proposal-summary-top"><span>Evidence-checked claims</span><CheckCircle2 size={15} /></div><h2>{analysis ? (analysis.claims?.length ?? 0) : "—"}</h2><p>Claims in current result</p></article>
+        <article className="proposal-summary-card"><div className="proposal-summary-top"><span>Relevant feedback</span><Lightbulb size={15} /></div><h2>{feedbackCount ?? (analysis ? 0 : "—")}</h2><p>Company feedback selected by API</p></article>
+      </section>
       <section className="proposal-submit-panel">
         <div className="proposal-form-heading"><h2>Analyze a product proposal</h2><Lightbulb size={20} /></div>
         <p>Analysis uses relevant saved evidence by default. Fresh external research is optional and may add time.</p>

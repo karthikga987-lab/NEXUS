@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import "./ProductTimeline.css";
 import {
   CalendarDays,
   Search,
@@ -7,6 +8,8 @@ import {
   Layers,
   RefreshCw,
   Building2,
+  Activity,
+  Tags,
 } from "lucide-react";
 
 const categoryIcons = {
@@ -38,6 +41,9 @@ export default function ProductTimeline({ events, sources = [], loading = false 
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState("All");
   const categories = ['All', ...new Set((events || []).map((event) => event.event_type).filter(Boolean))];
+  const eventItems = Array.isArray(events) ? events : [];
+  const totalLaunches = events == null ? null : eventItems.filter((event) => String(event.event_type || "").toLowerCase().includes("launch")).length;
+  const totalCategories = events == null ? null : new Set(eventItems.map((event) => event.event_type).filter(Boolean)).size;
 
   const filteredEvents = useMemo(() => {
     return (events || []).filter((event) => {
@@ -54,6 +60,11 @@ export default function ProductTimeline({ events, sources = [], loading = false 
 
   return (
     <div className="timeline-page">
+      <div className="timeline-summary" aria-label="Product event summary">
+        <div className="timeline-summary-card"><span><Activity size={14} />Total events</span><strong>{events == null ? "—" : eventItems.length}</strong></div>
+        <div className="timeline-summary-card"><span><Rocket size={14} />Documented launches</span><strong>{totalLaunches ?? "—"}</strong></div>
+        <div className="timeline-summary-card"><span><Tags size={14} />Event types</span><strong>{totalCategories ?? "—"}</strong></div>
+      </div>
 
       <div className="timeline-toolbar">
         <div className="timeline-search">
@@ -82,6 +93,7 @@ export default function ProductTimeline({ events, sources = [], loading = false 
                 ? "timeline-filter active"
                 : "timeline-filter"
             }
+            type="button"
             onClick={() => setActiveCategory(category)}
           >
             {category}
