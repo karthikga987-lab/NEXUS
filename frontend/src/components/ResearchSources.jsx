@@ -1,5 +1,8 @@
 
+
 import { useMemo, useState } from "react";
+import "./ResearchSources.css";
+
 import {
   Search,
   FileText,
@@ -7,7 +10,8 @@ import {
   Newspaper,
   BookOpen,
   CalendarDays,
-  ExternalLink,
+  Activity,
+  Tags,
 } from "lucide-react";
 
 const sampleSources = [
@@ -93,16 +97,62 @@ export default function ResearchSources() {
     });
   }, [search, activeType]);
 
+  const totalSources = sampleSources.length;
+
+  const totalReports = sampleSources.filter(
+    (source) => source.type === "Report"
+  ).length;
+
+  const totalTypes = new Set(
+    sampleSources.map((source) => source.type)
+  ).size;
+
   return (
     <div className="sources-page">
+
+      {/* Summary cards */}
+
+      <div className="sources-summary">
+
+        <div className="sources-summary-card">
+          <span>
+            <Activity size={14} />
+            Total Sources
+          </span>
+          <strong>{totalSources}</strong>
+        </div>
+
+        <div className="sources-summary-card">
+          <span>
+            <BookOpen size={14} />
+            Reports
+          </span>
+          <strong>{totalReports}</strong>
+        </div>
+
+        <div className="sources-summary-card">
+          <span>
+            <Tags size={14} />
+            Source Types
+          </span>
+          <strong>{totalTypes}</strong>
+        </div>
+
+      </div>
+
+      {/* Search toolbar */}
+
       <div className="sources-toolbar">
+
         <div className="sources-search">
           <Search size={18} />
+
           <input
             type="text"
             placeholder="Search research sources..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search research sources"
           />
         </div>
 
@@ -110,12 +160,16 @@ export default function ResearchSources() {
           <FileText size={17} />
           {filteredSources.length} sources
         </div>
+
       </div>
+
+      {/* Source type filters */}
 
       <div className="sources-filters">
         {sourceTypes.map((type) => (
           <button
             key={type}
+            type="button"
             className={
               activeType === type
                 ? "sources-filter active"
@@ -128,25 +182,32 @@ export default function ResearchSources() {
         ))}
       </div>
 
+      {/* Research source cards */}
+
       <div className="sources-list">
+
         {filteredSources.length > 0 ? (
           filteredSources.map((source) => {
             const SourceIcon = sourceIcons[source.type];
 
             return (
               <article className="source-card" key={source.id}>
+
                 <div className="source-icon">
                   <SourceIcon size={20} />
                 </div>
 
                 <div className="source-details">
+
                   <div className="source-card-top">
+
                     <span className="source-type">
                       {source.type}
                     </span>
 
                     <span className="source-date">
                       <CalendarDays size={14} />
+
                       {new Date(source.date).toLocaleDateString(
                         "en-IN",
                         {
@@ -156,14 +217,19 @@ export default function ResearchSources() {
                         }
                       )}
                     </span>
+
                   </div>
 
                   <h3>{source.title}</h3>
+
                   <span className="source-publisher">
                     {source.publisher}
                   </span>
+
                   <p>{source.description}</p>
+
                 </div>
+
               </article>
             );
           })
@@ -171,15 +237,22 @@ export default function ResearchSources() {
           <div className="sources-empty">
             <Search size={25} />
             <h3>No sources found</h3>
-            <p>Try another search or select a different source type.</p>
+            <p>
+              Try another search or select a different source type.
+            </p>
           </div>
         )}
+
       </div>
+
+      {/* Demo notice */}
 
       <p className="sources-demo-notice">
         Demonstration sources only. Real research sources will be
         loaded from the NEXUS backend after integration.
       </p>
+
     </div>
   );
 }
+

@@ -1,4 +1,6 @@
+
 import { useMemo, useState } from "react";
+import "./ProductTimeline.css";
 import {
   CalendarDays,
   Search,
@@ -7,6 +9,8 @@ import {
   Layers,
   RefreshCw,
   Building2,
+  Activity,
+  Tags,
 } from "lucide-react";
 
 const sampleEvents = [
@@ -87,8 +91,48 @@ export default function ProductTimeline() {
     });
   }, [search, activeCategory]);
 
+  const totalEvents = sampleEvents.length;
+
+  const totalLaunches = sampleEvents.filter(
+    (event) => event.category === "Launch"
+  ).length;
+
+  const totalCategories = new Set(
+    sampleEvents.map((event) => event.category)
+  ).size;
+
   return (
     <div className="timeline-page">
+
+      {/* Page summary */}
+
+      <div className="timeline-summary">
+        <div className="timeline-summary-card">
+          <span>
+            <Activity size={14} />
+            Total Events
+          </span>
+          <strong>{totalEvents}</strong>
+        </div>
+
+        <div className="timeline-summary-card">
+          <span>
+            <Rocket size={14} />
+            Launches
+          </span>
+          <strong>{totalLaunches}</strong>
+        </div>
+
+        <div className="timeline-summary-card">
+          <span>
+            <Tags size={14} />
+            Categories
+          </span>
+          <strong>{totalCategories}</strong>
+        </div>
+      </div>
+
+      {/* Search toolbar */}
 
       <div className="timeline-toolbar">
         <div className="timeline-search">
@@ -99,6 +143,7 @@ export default function ProductTimeline() {
             placeholder="Search product events..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search product events"
           />
         </div>
 
@@ -108,10 +153,13 @@ export default function ProductTimeline() {
         </div>
       </div>
 
+      {/* Category filters */}
+
       <div className="timeline-filters">
         {categories.map((category) => (
           <button
             key={category}
+            type="button"
             className={
               activeCategory === category
                 ? "timeline-filter active"
@@ -123,6 +171,8 @@ export default function ProductTimeline() {
           </button>
         ))}
       </div>
+
+      {/* Product event timeline */}
 
       <div className="timeline-list">
 
@@ -169,11 +219,15 @@ export default function ProductTimeline() {
           <div className="timeline-empty">
             <Search size={25} />
             <h3>No events found</h3>
-            <p>Try another search or select a different category.</p>
+            <p>
+              Try another search or select a different category.
+            </p>
           </div>
         )}
 
       </div>
+
+      {/* Demo notice */}
 
       <p className="timeline-demo-notice">
         Demonstration events only. Real company history will be

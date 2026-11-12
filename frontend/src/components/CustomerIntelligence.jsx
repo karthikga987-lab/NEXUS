@@ -6,8 +6,15 @@ import {
   ThumbsUp,
   ThumbsDown,
   Minus,
+  Users,
   TrendingUp,
+  Sparkles,
+  X,
+  ArrowUpRight,
+  Tag,
+  CalendarDays,
 } from "lucide-react";
+import "./CustomerIntelligence.css";
 
 const sampleFeedback = [
   {
@@ -60,27 +67,67 @@ const sampleFeedback = [
   },
 ];
 
-const sentimentIcons = {
-  Positive: ThumbsUp,
-  Negative: ThumbsDown,
-  Neutral: Minus,
-};
+const sentimentFilters = ["All", "Positive", "Neutral", "Negative"];
 
-const sentimentFilters = ["All", "Positive", "Negative", "Neutral"];
+const sentimentConfig = {
+  Positive: {
+    icon: ThumbsUp,
+    className: "positive",
+  },
+  Neutral: {
+    icon: Minus,
+    className: "neutral",
+  },
+  Negative: {
+    icon: ThumbsDown,
+    className: "negative",
+  },
+};
 
 export default function CustomerIntelligence() {
   const [search, setSearch] = useState("");
   const [activeSentiment, setActiveSentiment] = useState("All");
   const [selectedFeedback, setSelectedFeedback] = useState(null);
 
-  const filteredFeedback = useMemo(() => {
-    return sampleFeedback.filter((item) => {
-      const searchText = search.toLowerCase();
+  const total = sampleFeedback.length;
 
+  const counts = useMemo(() => {
+    const positive = sampleFeedback.filter(
+      (item) => item.sentiment === "Positive"
+    ).length;
+
+    const negative = sampleFeedback.filter(
+      (item) => item.sentiment === "Negative"
+    ).length;
+
+    const neutral = sampleFeedback.filter(
+      (item) => item.sentiment === "Neutral"
+    ).length;
+
+    return { positive, negative, neutral };
+  }, []);
+
+  const topics = useMemo(() => {
+    const categories = {};
+
+    sampleFeedback.forEach((item) => {
+      categories[item.category] =
+        (categories[item.category] || 0) + 1;
+    });
+
+    return Object.entries(categories)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count);
+  }, []);
+
+  const filteredFeedback = useMemo(() => {
+    const query = search.toLowerCase().trim();
+
+    return sampleFeedback.filter((item) => {
       const matchesSearch =
-        item.customer.toLowerCase().includes(searchText) ||
-        item.category.toLowerCase().includes(searchText) ||
-        item.message.toLowerCase().includes(searchText);
+        item.customer.toLowerCase().includes(query) ||
+        item.category.toLowerCase().includes(query) ||
+        item.message.toLowerCase().includes(query);
 
       const matchesSentiment =
         activeSentiment === "All" ||
@@ -90,146 +137,304 @@ export default function CustomerIntelligence() {
     });
   }, [search, activeSentiment]);
 
-  const positiveCount = sampleFeedback.filter(
-    (item) => item.sentiment === "Positive"
-  ).length;
+  const positivePercent = Math.round((counts.positive / total) * 100);
+  const negativePercent = Math.round((counts.negative / total) * 100);
+  const neutralPercent = Math.round((counts.neutral / total) * 100);
 
-  const negativeCount = sampleFeedback.filter(
-    (item) => item.sentiment === "Negative"
-  ).length;
-
-  const neutralCount = sampleFeedback.filter(
-    (item) => item.sentiment === "Neutral"
-  ).length;
+  const openFeedback = (item) => setSelectedFeedback(item);
 
   return (
     <div className="customer-page">
+      <div className="customer-heading">
+        <div>
+          <div className="customer-eyebrow">
+            <Sparkles size={14} />
+            CUSTOMER ANALYTICS
+          </div>
+          <h2>Customer Intelligence</h2>
+          <p>
+            Understand customer sentiment, discover recurring topics,
+            and explore product feedback.
+          </p>
+        </div>
+
+        <div className="customer-live-label">
+          <span />
+          Demo dataset
+        </div>
+      </div>
+
+      {/* SUMMARY CARDS */}
       <div className="customer-stats">
         <div className="customer-stat-card">
-          <span>Total Feedback</span>
-          <h2>{sampleFeedback.length}</h2>
-          <p>Demonstration entries</p>
+          <div className="customer-stat-top">
+            <span>Total Feedback</span>
+            <MessageSquare size={18} />
+          </div>
+          <h2>{total}</h2>
+          <p>Feedback entries analyzed</p>
         </div>
 
         <div className="customer-stat-card">
-          <span>Positive</span>
-          <h2>{positiveCount}</h2>
-          <p>Positive feedback entries</p>
+          <div className="customer-stat-top">
+            <span>Positive Sentiment</span>
+            <ThumbsUp size={18} />
+          </div>
+          <h2>{positivePercent}%</h2>
+          <p>{counts.positive} positive entries</p>
         </div>
 
         <div className="customer-stat-card">
-          <span>Negative</span>
-          <h2>{negativeCount}</h2>
-          <p>Negative feedback entries</p>
+          <div className="customer-stat-top">
+            <span>Negative Sentiment</span>
+            <ThumbsDown size={18} />
+          </div>
+          <h2>{negativePercent}%</h2>
+          <p>{counts.negative} negative entries</p>
         </div>
 
         <div className="customer-stat-card">
-          <span>Neutral</span>
-          <h2>{neutralCount}</h2>
-          <p>Neutral feedback entries</p>
+          <div className="customer-stat-top">
+            <span>Unique Customers</span>
+            <Users size={18} />
+          </div>
+          <h2>{new Set(sampleFeedback.map((item) => item.customer)).size}</h2>
+          <p>Customers represented</p>
         </div>
       </div>
 
-      <div className="customer-toolbar">
-        <div className="customer-search">
-          <Search size={18} />
-          <input
-            type="text"
-            placeholder="Search customer feedback..."
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
+      {/* ANALYTICS */}
+      <div className="customer-analytics-grid">
+        <section className="customer-panel sentiment-panel">
+          <div className="customer-section-heading">
+            <div>
+              <h3>Sentiment Overview</h3>
+              <p>Distribution of analyzed customer feedback</p>
+            </div>
+            <TrendingUp size={19} />
+          </div>
+
+          <div className="sentiment-content">
+            <div
+              className="sentiment-donut"
+              style={{
+                background: `conic-gradient(
+                  #a78bfa 0% ${positivePercent}%,
+                  #77718d ${positivePercent}% ${positivePercent + neutralPercent}%,
+                  #d47b9c ${positivePercent + neutralPercent}% 100%
+                )`,
+              }}
+            >
+              <div className="sentiment-donut-inner">
+                <strong>{total}</strong>
+                <span>Responses</span>
+              </div>
+            </div>
+
+            <div className="sentiment-legend">
+              <div>
+                <span className="legend-dot positive-dot" />
+                <span>Positive</span>
+                <strong>{positivePercent}%</strong>
+              </div>
+              <div>
+                <span className="legend-dot neutral-dot" />
+                <span>Neutral</span>
+                <strong>{neutralPercent}%</strong>
+              </div>
+              <div>
+                <span className="legend-dot negative-dot" />
+                <span>Negative</span>
+                <strong>{negativePercent}%</strong>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="customer-panel topics-panel">
+          <div className="customer-section-heading">
+            <div>
+              <h3>Customer Topics</h3>
+              <p>Most frequently mentioned categories</p>
+            </div>
+            <Tag size={19} />
+          </div>
+
+          <div className="topic-list">
+            {topics.map((topic) => (
+              <div className="topic-item" key={topic.name}>
+                <div className="topic-label">
+                  <span>{topic.name}</span>
+                  <strong>{topic.count}</strong>
+                </div>
+                <div className="topic-track">
+                  <div
+                    className="topic-fill"
+                    style={{
+                      width: `${(topic.count / total) * 100}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      {/* FEEDBACK EXPLORER */}
+      <section className="customer-panel feedback-explorer">
+        <div className="customer-section-heading explorer-heading">
+          <div>
+            <h3>Customer Feedback Explorer</h3>
+            <p>Search and inspect individual customer responses</p>
+          </div>
+          <span className="feedback-total">
+            {filteredFeedback.length} entries
+          </span>
         </div>
 
-        <span className="customer-count">
-          <MessageSquare size={16} />
-          {filteredFeedback.length} entries
-        </span>
-      </div>
+        <div className="customer-toolbar">
+          <div className="customer-search">
+            <Search size={17} />
+            <input
+              type="text"
+              placeholder="Search customers, topics or feedback..."
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </div>
+        </div>
 
-      <div className="customer-filters">
-        {sentimentFilters.map((sentiment) => (
-          <button
-            key={sentiment}
-            className={
-              activeSentiment === sentiment
-                ? "customer-filter active"
-                : "customer-filter"
-            }
-            onClick={() => setActiveSentiment(sentiment)}
-          >
-            {sentiment}
-          </button>
-        ))}
-      </div>
+        <div className="customer-filters">
+          {sentimentFilters.map((sentiment) => (
+            <button
+              key={sentiment}
+              className={
+                activeSentiment === sentiment
+                  ? "customer-filter active"
+                  : "customer-filter"
+              }
+              onClick={() => setActiveSentiment(sentiment)}
+            >
+              {sentiment}
+            </button>
+          ))}
+        </div>
 
-      <div className="customer-feedback-list">
-        {filteredFeedback.length > 0 ? (
-          filteredFeedback.map((item) => {
-            const SentimentIcon = sentimentIcons[item.sentiment];
+        <div className="customer-feedback-list">
+          {filteredFeedback.length > 0 ? (
+            filteredFeedback.map((item) => {
+              const config = sentimentConfig[item.sentiment];
+              const SentimentIcon = config.icon;
 
-            return (
-              <article className="feedback-card" key={item.id}>
-                <div className="feedback-card-top">
-                  <div>
-                    <h3>{item.customer}</h3>
-                    <span className="feedback-category">
-                      {item.category}
+              return (
+                <article className="feedback-card" key={item.id}>
+                  <div className="feedback-card-top">
+                    <div className="feedback-customer-info">
+                      <div className="feedback-avatar">
+                        {item.customer.replace("Customer ", "")}
+                      </div>
+                      <div>
+                        <h4>{item.customer}</h4>
+                        <span className="feedback-category">
+                          {item.category}
+                        </span>
+                      </div>
+                    </div>
+
+                    <span
+                      className={`feedback-sentiment ${config.className}`}
+                    >
+                      <SentimentIcon size={14} />
+                      {item.sentiment}
                     </span>
                   </div>
 
-                  <span
-                    className={`feedback-sentiment ${item.sentiment.toLowerCase()}`}
-                  >
-                    <SentimentIcon size={14} />
-                    {item.sentiment}
-                  </span>
-                </div>
+                  <p className="feedback-message">{item.message}</p>
 
-                <p>{item.message}</p>
+                  <div className="feedback-card-bottom">
+                    <span>
+                      <CalendarDays size={14} />
+                      {item.date}
+                    </span>
+                    <button onClick={() => openFeedback(item)}>
+                      View details
+                      <ArrowUpRight size={14} />
+                    </button>
+                  </div>
+                </article>
+              );
+            })
+          ) : (
+            <div className="customer-empty">
+              <Search size={25} />
+              <h3>No feedback found</h3>
+              <p>Try another search or sentiment filter.</p>
+            </div>
+          )}
+        </div>
+      </section>
 
-                <div className="feedback-card-bottom">
-                  <span>{item.date}</span>
-                  <button
-                    onClick={() => setSelectedFeedback(item)}
-                  >
-                    View details
-                  </button>
-                </div>
-              </article>
-            );
-          })
-        ) : (
-          <div className="customer-empty">
-            <Search size={25} />
-            <h3>No feedback found</h3>
-            <p>Try another search or sentiment filter.</p>
-          </div>
-        )}
+      <div className="customer-demo-notice">
+        <Sparkles size={15} />
+        Demonstration data only. Live customer feedback and AI sentiment
+        analysis will be connected to the NEXUS backend during integration.
       </div>
 
+      {/* FEEDBACK DETAILS MODAL */}
       {selectedFeedback && (
-        <div className="feedback-detail">
-          <div className="feedback-detail-heading">
-            <h3>Feedback Details</h3>
-            <button onClick={() => setSelectedFeedback(null)}>
-              Close
+        <div
+          className="feedback-modal-overlay"
+          onClick={() => setSelectedFeedback(null)}
+        >
+          <div
+            className="feedback-modal"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="feedback-modal-heading">
+              <div>
+                <span className="customer-eyebrow">FEEDBACK DETAILS</span>
+                <h3>{selectedFeedback.customer}</h3>
+              </div>
+              <button
+                className="feedback-close"
+                onClick={() => setSelectedFeedback(null)}
+                aria-label="Close feedback details"
+              >
+                <X size={19} />
+              </button>
+            </div>
+
+            <div className="feedback-modal-meta">
+              <span>{selectedFeedback.category}</span>
+              <span className={`feedback-sentiment ${
+                sentimentConfig[selectedFeedback.sentiment].className
+              }`}>
+                {selectedFeedback.sentiment}
+              </span>
+            </div>
+
+            <div className="feedback-modal-message">
+              <span>Customer message</span>
+              <p>{selectedFeedback.message}</p>
+            </div>
+
+            <div className="feedback-modal-date">
+              <CalendarDays size={15} />
+              Submitted on {selectedFeedback.date}
+            </div>
+
+            <button
+              className="feedback-modal-done"
+              onClick={() => setSelectedFeedback(null)}
+            >
+              Close details
             </button>
           </div>
-
-          <p><strong>Customer:</strong> {selectedFeedback.customer}</p>
-          <p><strong>Category:</strong> {selectedFeedback.category}</p>
-          <p><strong>Sentiment:</strong> {selectedFeedback.sentiment}</p>
-          <p><strong>Date:</strong> {selectedFeedback.date}</p>
-          <p><strong>Feedback:</strong> {selectedFeedback.message}</p>
         </div>
       )}
-
-      <p className="customer-demo-notice">
-        Demonstration customer feedback only. Real feedback and
-        sentiment analysis will be loaded from the NEXUS backend
-        after integration.
-      </p>
     </div>
   );
 }
+
+
