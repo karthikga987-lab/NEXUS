@@ -241,3 +241,39 @@ This section records the state before Member 1 frontend recovery and is supersed
 ### Remaining demo limitations
 
 The UI uses real backend responses but this pass did not run live company research or model inference. The previous local synthetic workflow remains the evidence for those paths. CSV feedback upload remains backend-only in the UI; proposal history has no list page; internal-source routes remain loopback-only development functionality without production authentication. Readiness remains **PARTIALLY READY** until a manual browser smoke test and supervised local demo are completed.
+
+## Four-member team integration branch (2026-11-13)
+
+### Branch and merge decisions
+
+- A new local `integration/team-integration` branch was created from `feature/ai-intelligence` at `6ea6c33`; the AI branch and safety backup branch were left unchanged. Remote branches were fetched before review: `main` `19f1f6d`, frontend `947138e`, data collection `35e281c`, customer intelligence `924ef0d`, AI `6ea6c33`.
+- Member 1's latest frontend commit `947138e` is already an ancestor of the AI branch. The branch therefore required no duplicate frontend copy or overwrite.
+- Member 2's compatible research behavior is already adapted into `backend/app/research/` and `backend/app/api/routes/companies.py`: bounded DDGS discovery, URL normalization, robots/SSRF/redirect protections, HTML processing, full-document versus search-snippet handling, deduplication, provenance, persisted run status, and the existing ingestion integration. The historical Member 2 branch has a distinct Alembic root, a separate internal-source model, and Gemini extraction. Those files were not merged; the current Ollama/Qwen pipeline and one canonical `SourceDocument` model are retained.
+- Member 4's current feedback routes and services are retained: company-scoped submission, analysis/trends, reanalysis, CSV upload, and public-source provenance checks. The older Member 4 branch replaces the starter feedback/model stack and removes the newer integrated schema and AI routes; it was not merged wholesale. Sentiment/topic classification is heuristic, and there is no automated public-review discovery.
+- The existing additive data-contract extension remains unchanged. This pass added no ORM fields, tables, migrations, enum values, or API contracts. Current Alembic history has one head, `a83f4d129c71`; its fresh/upgrade regression checks use temporary SQLite databases only. No actual development database was opened or migrated.
+
+### Setup and team sharing
+
+- Replaced the scaffold-era README with current Windows setup and feature instructions, added the detailed branch/migration/security/team workflow in `docs/TEAM_INTEGRATION_AND_SETUP.md`, and updated the root `.env.example` with non-secret SQLite/CORS/Ollama/local-source defaults. The actual `.env` files were not read or modified.
+- GitHub branch sharing provides source code only. It does not provision shared hosting, a shared database, Ollama models, documents, or secrets. A production/shared deployment still needs managed hosting, database operations, durable job processing, secret management, monitoring/backups, and authentication/authorization.
+
+### Verification in this pass
+
+| Check | Result |
+|---|---:|
+| Backend suite from repository root: `python -m pytest backend/tests -q` | **194 passed, 0 failed, 0 skipped**, 24.53 s; one upstream Starlette/anyio deprecation warning |
+| Backend suite from `backend`: `python -m pytest tests -q` | **194 passed, 0 failed, 0 skipped**, 24.22 s; same warning |
+| Focused workflow/dashboard/proposal/internal-source integration tests | **22 passed**, 4.08 s; same warning |
+| Temporary-SQLite migration regressions (confidence, KnowledgeItem, snapshot) | **13 passed**, 14.13 s |
+| Frontend unit tests: `node --test tests/*.test.js` | **16 passed**, 0 failed |
+| Frontend production build | **Passed**, Vite 8.3.6, 2,082 modules, 828 ms |
+| FastAPI smoke | `GET /health` and `/openapi.json` returned 200 with an in-memory SQLite configuration; 12 key research, source, event, knowledge, graph, ingestion, feedback, proposal, and AI routes were present |
+| Fresh temporary app startup | Alembic upgraded a newly created temp SQLite DB through `a83f4d129c71`; FastAPI and Vite started, served the browser test, and were stopped afterward. The temporary test DB was retained; the actual development DB was untouched. |
+| Actual browser smoke | **Partial pass** on the integrated Vite app with an isolated, freshly migrated temporary SQLite database; two QA companies were created and switched between |
+| `git diff --check` | **Passed**; only Git's expected Windows LF-to-CRLF working-copy notices were printed |
+
+The actual browser smoke used the integrated frontend at `http://127.0.0.1:5173` and backend at `http://127.0.0.1:8000`, pointed only at a new temporary SQLite database. The UI created two clearly named QA companies, opened both workspaces, switched between them, refreshed, and retained the selected workspace. Overview, Product Timeline, Research Sources, Knowledge Graph, Customer Intelligence, Proposal Analysis, and AI Assistant all rendered. Empty states were honest: the companies had no website, documents, events, graph relationships, feedback, proposals, or AI evidence. Research was correctly disabled without a website; local document access returned the expected 403 because its opt-in is off. The graph displayed the company node and zero relationships. The proposal history/form and AI Assistant rendered, but Ollama was unavailable, so no proposal was submitted and no AI question was sent. Since both QA companies were empty, this browser pass did not demonstrate isolation of populated records; automated company-scope tests passed.
+
+The browser console query returned no warnings or errors. Backend access logs showed the active-origin company and dashboard resource requests returning 200; the local internal-source request returned its expected 403. An initial probe used port 5174, which is outside the default CORS allowlist, and a later test server used a malformed temporary SQLite URL; those harness mistakes caused preliminary CORS/DB errors and were corrected by using the documented 5173 origin and the valid temporary DB URL. They did not require application changes. The narrow in-app browser viewport showed a horizontal scrollbar, so full desktop/mobile responsive verification remains outstanding. No fresh external research or live Ollama generation was performed; previous synthetic/API and DDGS checks remain historical results from the dated sections above, not results of this pass.
+
+**Current assessment: PARTIALLY READY.** The local browser confirmed navigation, empty states and company switching, but populated-data isolation, live model-backed proposal/RAG, fresh external research, and full responsive behavior were not verified in this pass. No shared hosted application exists, and authentication/authorization remains a production blocker.
