@@ -116,7 +116,14 @@ function classificationName(value) {
   return labels[value] || 'Unknown';
 }
 
-function uniqueFeedback(feedbackData) {
+function uniqueFeedback(feedbackData, feedbackRecords) {
+  if (Array.isArray(feedbackRecords)) {
+    return feedbackRecords.map((item) => ({
+      ...item,
+      feedback_id: item.id,
+      topic: item.topics?.[0] || 'general',
+    }));
+  }
   const records = new Map();
   (feedbackData?.trends || []).forEach((trend) => {
     (trend.evidence || []).forEach((item) => {
@@ -291,7 +298,7 @@ export default function CompanyIntelligence({
     ['documented', 'supported'].includes(event.evidence_classification)
   );
   const sourceById = new Map((sources || []).map((source) => [source.id, source]));
-  const feedbackRecords = uniqueFeedback(data.feedback);
+  const feedbackRecords = uniqueFeedback(data.feedback, data.feedbackRecords);
   const processingCounts = data.ingestion?.processing_status_counts || {};
   const processedCount = processingCounts.processed ?? processingCounts.completed ?? 0;
   const failedCount = processingCounts.failed ?? 0;
@@ -330,6 +337,7 @@ export default function CompanyIntelligence({
           ) : (
             <span className="company-website unavailable">Website unavailable</span>
           )}
+          {company.industry && <span className="company-industry">Industry: {company.industry}</span>}
         </div>
         <span className="profile-source-label">Saved company data</span>
       </div>
@@ -354,6 +362,12 @@ export default function CompanyIntelligence({
           <span className="summary-label">Verified product events</span>
           <strong className="summary-number">{events ? verifiedEvents.length : '—'}</strong>
           <small>{events ? 'Documented or supported' : 'Event count unavailable'}</small>
+        </article>
+
+        <article className="company-summary-card">
+          <span className="summary-label">Knowledge items</span>
+          <strong className="summary-number">{data.knowledgeItems === null ? (loading ? '…' : '—') : knowledgeItems.length}</strong>
+          <small>{data.knowledgeItems === null ? (loading ? 'Loading count' : 'Count unavailable') : 'Evidence-linked company knowledge'}</small>
         </article>
 
         <article className="company-summary-card">
@@ -696,7 +710,7 @@ export default function CompanyIntelligence({
               <div className="failed-source-list">
                 <strong>Failed documents</strong>
                 {sources.filter((source) => source.processing_status === 'failed').map((source) => (
-                  <p key={source.id}>{source.title || source.url} — failure details are not exposed by the source API.</p>
+                  <p key={source.id}>{source.title || source.url} — {source.processing_failed_stage ? `${source.processing_failed_stage.replaceAll('_', ' ')}: ` : ''}{source.processing_error || 'Safe failure details are unavailable.'}</p>
                 ))}
               </div>
             )}
@@ -760,6 +774,7 @@ export default function CompanyIntelligence({
                           {record.rating != null && <span>Rating {record.rating}</span>}
                         </div>
                         <p>{record.feedback_text || 'Feedback text unavailable.'}</p>
+                        <small>{record.product_name || 'Product unavailable'} · {formatDate(record.created_at_source || record.collected_at)} · Rating {record.rating == null ? 'unavailable' : `${record.rating}/5`}</small>
                         {record.source_url && <a href={record.source_url} target="_blank" rel="noreferrer">Feedback source <ExternalLink size={12} /></a>}
                       </article>
                     ))}

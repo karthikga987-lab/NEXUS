@@ -17,6 +17,7 @@ from app.models.entities import (
     Proposal,
     ProposalAnalysis,
     ProductEvent,
+    ResearchRun,
     SourceDocument,
     event_sources,
     relationship_sources,
@@ -237,6 +238,7 @@ class RelationshipPersistenceTests(unittest.TestCase):
 
         required_tables = [
             Company.__table__,
+            ResearchRun.__table__,
             Proposal.__table__,
             ProposalAnalysis.__table__,
             ProductEvent.__table__,
@@ -339,6 +341,7 @@ class RelationshipPersistenceTests(unittest.TestCase):
             Proposal.__table__,
                 ProductEvent.__table__,
                 SourceDocument.__table__,
+                ResearchRun.__table__,
                 Company.__table__,
             ],
         )

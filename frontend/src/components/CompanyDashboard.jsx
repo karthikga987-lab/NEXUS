@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
 
 import { api } from '../api/client';
@@ -41,6 +41,7 @@ function emptyData() {
     events: null,
     sources: null,
     feedback: null,
+    feedbackRecords: null,
     feedbackAnalysis: null,
     ingestion: null,
     graph: null,
@@ -55,6 +56,7 @@ function emptyData() {
 
 export default function CompanyDashboard({ company: initialCompany, onBack }) {
   const [company, setCompany] = useState(initialCompany);
+  const loadedCompanyId = useRef(initialCompany.id);
   const [activeSection, setActiveSection] = useState(() => readInitialSection(initialCompany.id));
   const [data, setData] = useState(emptyData);
   const [loading, setLoading] = useState(false);
@@ -78,16 +80,21 @@ export default function CompanyDashboard({ company: initialCompany, onBack }) {
 
   useEffect(() => {
     let active = true;
+    if (loadedCompanyId.current !== initialCompany.id) {
+      loadedCompanyId.current = initialCompany.id;
+      setCompany(initialCompany);
+      setData(emptyData());
+    }
     setLoading(true);
-    setData(emptyData());
 
     const requests = [
       ['company', api.getCompany],
       ['events', api.companyEvents],
       ['sources', api.companySources],
       ['feedback', api.companyFeedbackTrends],
+      ['feedbackRecords', api.companyFeedbackRecords],
       ['feedbackAnalysis', api.companyFeedbackAnalysis],
-      ['ingestion', api.companyIngestionStatus],
+      ['ingestion', (id) => api.companyIngestionStatus(id, includeInternalInViews)],
       ['graph', api.companyKnowledgeGraph],
       ['internalSources', api.companyInternalSources],
       ['knowledgeItems', (id) => api.companyKnowledgeItems(id, '', includeInternalInViews)],
@@ -136,7 +143,7 @@ export default function CompanyDashboard({ company: initialCompany, onBack }) {
     const poll = async () => {
       const [researchResult, ingestionResult] = await Promise.allSettled([
         api.companyResearchStats(initialCompany.id),
-        api.companyIngestionStatus(initialCompany.id),
+        api.companyIngestionStatus(initialCompany.id, includeInternalInViews),
       ]);
       if (!active) return;
       setData((current) => {
@@ -179,7 +186,15 @@ export default function CompanyDashboard({ company: initialCompany, onBack }) {
     () => api.researchCompany(company.id),
     (result) => {
       const counts = result.counts || {};
-      return `Research ${result.status || 'finished'}: ${counts.discovered ?? 0} discovered, ${counts.collected ?? 0} full documents, ${counts.failed ?? 0} failed, ${counts.skipped_duplicates ?? 0} duplicate URLs skipped.`;
+      const failures = (result.results || [])
+        .filter((item) => item.status === 'failed')
+        .slice(0, 3)
+        .map((item) => `${item.url || 'URL unavailable'}: ${item.reason || 'Failure reason unavailable'}`);
+      const failureText = failures.length ? ` Failures: ${failures.join(' · ')}` : '';
+      const discoveryText = result.discovery_errors?.length
+        ? ` Discovery: ${result.discovery_errors.slice(0, 2).join(' · ')}`
+        : '';
+      return `Research ${result.status || 'finished'}: ${counts.discovered ?? 0} discovered, ${counts.collected ?? 0} full documents, ${counts.failed ?? 0} fetch failures, ${counts.skipped ?? 0} skipped, ${counts.skipped_duplicates ?? 0} duplicate URLs skipped.${failureText}${discoveryText}`;
     },
   );
 
@@ -281,12 +296,15 @@ export default function CompanyDashboard({ company: initialCompany, onBack }) {
             <CustomerIntelligence
               companyId={company.id}
               feedback={data.feedback}
+              feedbackRecords={data.feedbackRecords}
               analysis={data.feedbackAnalysis}
               loading={loading}
               onSubmitFeedback={submitFeedback}
             />
           )}
-          {activeSection === 'proposals' && <ProposalAnalysis company={company} />}
+          {activeSection === 'proposals' && (
+            <ProposalAnalysis company={company} onRefreshData={refresh} />
+          )}
           {activeSection === 'ai-assistant' && <AIAssistant company={company} />}
           {data.errors.length > 0 && (
             <p className="dashboard-load-warning" role="alert">

@@ -7,7 +7,10 @@ from app.core.local_access import require_local_internal_access
 from app.db.session import get_db
 from app.intelligence.embeddings import EmbeddingError, search_similar_chunks
 from app.models import Company, KnowledgeItem, ResearchRun, SourceDocument
+from app.models.entities import feedback_topics
+from app.feedback.queries import list_public_company_feedback
 from app.research.persistence import save_internal_source
+from app.research.status import effective_research_status
 
 router = APIRouter()
 MAX_INTERNAL_DOCUMENT_BYTES = 1_000_000
@@ -30,6 +33,8 @@ def _source_response(source: SourceDocument, *, include_content: bool = False) -
         "collected_at": source.collected_at,
         "permission_status": source.permission_status,
         "processing_status": source.processing_status,
+        "processing_failed_stage": source.processing_failed_stage,
+        "processing_error": source.processing_error,
         "original_filename": metadata.get("original_filename"),
         "author": metadata.get("author"),
         "recorded_at": metadata.get("recorded_at"),
@@ -54,7 +59,10 @@ def get_research_stats(company_id: str, db: Session = Depends(get_db)):
     )
     return {
         "company_id": company_id,
-        "research_status": company.research_status,
+        "research_status": effective_research_status(
+            company.research_status,
+            run.status if run is not None else None,
+        ),
         "latest_run": None if run is None else {
             "id": run.id,
             "status": run.status,
@@ -64,6 +72,43 @@ def get_research_stats(company_id: str, db: Session = Depends(get_db)):
             "failure_summary": run.failure_summary,
         },
     }
+
+
+@router.get("/{company_id}/feedback")
+def list_company_feedback(company_id: str, db: Session = Depends(get_db)):
+    """Return the selected company's public or unlinked feedback records."""
+    if db.get(Company, company_id) is None:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    records = list_public_company_feedback(db, company_id)
+    topics_by_feedback: dict[str, list[str]] = {}
+    if records:
+        rows = db.execute(
+            feedback_topics.select().where(
+                feedback_topics.c.feedback_id.in_([record.id for record in records])
+            )
+        ).all()
+        for row in rows:
+            topics_by_feedback.setdefault(row.feedback_id, []).append(row.topic)
+
+    items = [{
+        "id": item.id,
+        "company_id": item.company_id,
+        "product_name": item.product_name,
+        "source_id": item.source_id,
+        "source_url": item.source_url,
+        "external_reference": item.external_reference,
+        "feedback_text": item.feedback_text,
+        "rating": item.rating,
+        "language": item.language,
+        "created_at_source": item.created_at_source,
+        "collected_at": item.collected_at,
+        "sentiment": item.sentiment,
+        "topics": sorted(set(topics_by_feedback.get(item.id, []))),
+        "feedback_type": item.feedback_type,
+        "analysis_status": item.analysis_status,
+    } for item in records]
+    return {"company_id": company_id, "total": len(items), "items": items}
 
 
 @router.post("/{company_id}/internal-sources", status_code=201)

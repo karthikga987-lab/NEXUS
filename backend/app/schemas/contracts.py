@@ -2,12 +2,13 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class CompanyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     website: str | None = None
+    industry: str | None = Field(default=None, max_length=255)
     description: str | None = None
 
 
@@ -15,8 +16,18 @@ class CompanyOut(BaseModel):
     id: str
     name: str
     website: str | None
+    industry: str | None
     description: str | None
+    research_status: str
     created_at: datetime
+    updated_at: datetime
+
+    @field_validator("research_status", mode="before")
+    @classmethod
+    def normalize_legacy_pending_status(cls, value: str) -> str:
+        # Existing rows may contain the pre-contract ORM default. Normalize
+        # only the API representation; never rewrite persisted user data.
+        return "not_started" if value == "pending" else value
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -40,6 +51,8 @@ class SourceOut(BaseModel):
     discovery_method: str | None = None
     original_url: str | None = None
     extracted_event_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    processing_failed_stage: str | None = None
+    processing_error: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -83,10 +96,23 @@ class KnowledgeItemOut(BaseModel):
     is_synthetic: bool = False
 
 
+class ProposalCreateIn(BaseModel):
+    company_id: str
+    title: str = Field(min_length=1, max_length=500)
+    description: str = Field(min_length=20)
+
+
 class ProposalAnalyzeIn(BaseModel):
     company_id: str
     title: str = Field(min_length=1, max_length=500)
     description: str = Field(min_length=20)
+    proposal_id: str | None = Field(
+        default=None,
+        description=(
+            "Attach this analysis to an already saved proposal belonging to "
+            "the same company."
+        ),
+    )
     include_fresh_external_research: bool = Field(
         default=False,
         description=(
@@ -105,9 +131,14 @@ class ProposalAnalyzeIn(BaseModel):
 
 class FeedbackCreate(BaseModel):
     company_id: str
-    text: str = Field(min_length=1)
-    product_name: str | None = None
-    source_url: str | None = None
+    text: str = Field(min_length=1, max_length=10000)
+    product_name: str | None = Field(default=None, max_length=255)
+    source_id: str | None = None
+    source_url: str | None = Field(default=None, max_length=1000)
+    external_reference: str | None = Field(default=None, max_length=255)
+    language: str | None = Field(default=None, max_length=40)
     source_type: str = "user_upload"
     rating: float | None = Field(default=None, ge=0, le=5)
+    created_at_source: datetime | None = None
+    # Backward-compatible name used by the existing frontend.
     feedback_date: datetime | None = None

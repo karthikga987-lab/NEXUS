@@ -7,6 +7,7 @@ import networkx as nx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.research.status import effective_research_status
 from app.models.entities import (
     AnalysisEvidence,
     Company,
@@ -14,6 +15,7 @@ from app.models.entities import (
     Proposal,
     ProposalAnalysis,
     ProductEvent,
+    ResearchRun,
     SourceDocument,
     analysis_events,
     event_sources,
@@ -55,6 +57,16 @@ def build_company_graph(
     if company is None:
         raise ValueError(f"Company not found: {company_id}")
 
+    latest_run_status = None
+    if company.research_status in {"pending", "not_started"}:
+        latest_run_status = (
+            db.query(ResearchRun.status)
+            .filter(ResearchRun.company_id == company_id)
+            .order_by(ResearchRun.started_at.desc())
+            .first()
+        )
+        latest_run_status = latest_run_status[0] if latest_run_status else None
+
     company_node = f"company:{company.id}"
 
     graph.add_node(
@@ -65,7 +77,12 @@ def build_company_graph(
         website=company.website,
         industry=company.industry,
         description=company.description,
-        research_status=_safe_value(company.research_status),
+        research_status=_safe_value(
+            effective_research_status(
+                company.research_status,
+                latest_run_status,
+            )
+        ),
     )
 
     sources = (
@@ -357,23 +374,25 @@ def build_company_graph(
             ),
         )
 
-    # Show a proposal in the graph only when its saved analysis has an
-    # explicit public source or product-event association. Proposal text is
-    # never treated as a historical event, and internal-source analyses are
-    # excluded from this unauthenticated graph response.
-    proposal_analysis_rows = (
-        db.query(Proposal, ProposalAnalysis)
-        .join(ProposalAnalysis, ProposalAnalysis.proposal_id == Proposal.id)
+    # Proposals and analyses are first-class workflow nodes, never historical
+    # product events. Source/event edges are added only for explicit persisted
+    # associations, and restricted analysis details remain hidden.
+    proposal_by_id = {
+        proposal.id: proposal
+        for proposal in db.query(Proposal)
         .filter(Proposal.company_id == company_id)
+        .all()
+    }
+    proposal_analysis_rows = (
+        db.query(ProposalAnalysis)
+        .filter(ProposalAnalysis.proposal_id.in_(list(proposal_by_id)))
         .all()
     )
     analyses_by_proposal: dict[str, list[ProposalAnalysis]] = {}
     analysis_by_id: dict[str, ProposalAnalysis] = {}
-    proposal_by_id: dict[str, Proposal] = {}
-    for proposal, analysis in proposal_analysis_rows:
-        analyses_by_proposal.setdefault(proposal.id, []).append(analysis)
+    for analysis in proposal_analysis_rows:
+        analyses_by_proposal.setdefault(analysis.proposal_id, []).append(analysis)
         analysis_by_id[analysis.id] = analysis
-        proposal_by_id[proposal.id] = proposal
 
     evidence_by_analysis: dict[str, list[tuple[AnalysisEvidence, SourceDocument]]] = {}
     restricted_analysis_ids: set[str] = set()
@@ -418,14 +437,12 @@ def build_company_graph(
                 if event_id in event_by_id:
                     event_links.add((analysis.id, event_id))
 
-        # Only graph proposals with an explicitly persisted eligible link.
-        if not source_links and not event_links:
-            continue
-
         proposal_node = f"proposal:{proposal.id}"
+        proposal_analyses = analyses_by_proposal.get(proposal_id, [])
         latest_analysis = max(
-            analyses_by_proposal[proposal_id],
+            proposal_analyses,
             key=lambda item: item.created_at,
+            default=None,
         )
         graph.add_node(
             proposal_node,
@@ -435,11 +452,11 @@ def build_company_graph(
             title=proposal.title,
             description=proposal.description,
             proposal_status=proposal.status,
-            analysis_status=(
+            analysis_status=(None if latest_analysis is None else (
                 latest_analysis.status
                 if latest_analysis.id not in restricted_analysis_ids
                 else "restricted"
-            ),
+            )),
             created_at=_safe_value(proposal.created_at),
             historical_event=False,
             interpretation_warning=(
@@ -452,6 +469,34 @@ def build_company_graph(
             relation_type="HAS_PROPOSAL",
             provenance_status="persisted_company_proposal_association",
         )
+
+        for analysis in proposal_analyses:
+            accessible = analysis.id not in restricted_analysis_ids
+            analysis_node = f"proposal_analysis:{analysis.id}"
+            graph.add_node(
+                analysis_node,
+                node_type="proposal_analysis",
+                analysis_id=analysis.id,
+                proposal_id=proposal.id,
+                company_id=proposal.company_id,
+                status=analysis.status if accessible else "restricted",
+                created_at=_safe_value(analysis.created_at),
+                completed_at=_safe_value(analysis.completed_at) if accessible else None,
+                recommendation_available=bool(
+                    accessible and analysis.recommendation
+                ),
+                historical_event=False,
+                interpretation_warning=(
+                    "AI-generated analysis of a user-submitted proposal; "
+                    "not a documented company decision or product event."
+                ),
+            )
+            graph.add_edge(
+                proposal_node,
+                analysis_node,
+                relation_type="HAS_ANALYSIS",
+                provenance_status="persisted_proposal_analysis_association",
+            )
 
         for analysis, evidence, source in source_links:
             graph.add_edge(
@@ -491,6 +536,8 @@ def get_graph_summary(graph: nx.MultiDiGraph) -> dict[str, Any]:
         "companies": 0,
         "events": 0,
         "sources": 0,
+        "proposals": 0,
+        "proposal_analyses": 0,
     }
 
     for _, attributes in graph.nodes(data=True):
@@ -502,6 +549,10 @@ def get_graph_summary(graph: nx.MultiDiGraph) -> dict[str, Any]:
             node_counts["events"] += 1
         elif node_type == "source":
             node_counts["sources"] += 1
+        elif node_type == "proposal":
+            node_counts["proposals"] += 1
+        elif node_type == "proposal_analysis":
+            node_counts["proposal_analyses"] += 1
 
     relationship_counts: dict[str, int] = {}
 

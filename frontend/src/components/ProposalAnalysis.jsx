@@ -14,6 +14,8 @@ import {
   Users,
 } from 'lucide-react';
 import { api } from '../api/client';
+import { runProposalWorkflow } from '../proposalWorkflow';
+import { hasVerifiedProposalClaims } from '../proposalAssistant';
 import './ProposalAnalysis.css';
 
 function EvidenceCard({ item }) {
@@ -40,6 +42,13 @@ function EvidenceCard({ item }) {
       </div>
       <h4>{item.source_title || 'Untitled source'}</h4>
       <p>{item.source_company_name || 'Company unavailable'}</p>
+      {(item.publisher || item.source_type || item.publication_date) && (
+        <p className="proposal-source-metadata">
+          {[item.publisher, item.source_type, item.publication_date]
+            .filter(Boolean)
+            .join(' · ')}
+        </p>
+      )}
       <p className="proposal-relevance-label">
         Relevance assessment: {relevanceLabels[item.proposal_relevance] || 'Not classified; candidate only'}
         {item.proposal_aspect ? ` · ${item.proposal_aspect}` : ''}
@@ -224,7 +233,15 @@ function CustomerFeedback({ context }) {
   );
 }
 
-export default function ProposalAnalysis({ company }) {
+const WORKFLOW_STAGES = [
+  ['proposal_save', 'Save proposal to this company'],
+  ['research', 'Public company research'],
+  ['ingestion', 'Document ingestion and embeddings'],
+  ['knowledge_graph', 'Evidence-backed relationship update'],
+  ['proposal_analysis', 'Proposal analysis and save'],
+];
+
+export default function ProposalAnalysis({ company, onRefreshData = () => {} }) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [includeFreshResearch, setIncludeFreshResearch] = useState(false);
@@ -238,6 +255,8 @@ export default function ProposalAnalysis({ company }) {
   const [openingAnalysisId, setOpeningAnalysisId] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [workflowStages, setWorkflowStages] = useState(null);
+  const [refreshReport, setRefreshReport] = useState(null);
 
   useEffect(() => {
     let active = true;
@@ -278,26 +297,30 @@ export default function ProposalAnalysis({ company }) {
     setError('');
     setAnalysis(null);
     setSelectedProposal(null);
+    setWorkflowStages(Object.fromEntries(
+      WORKFLOW_STAGES.map(([key]) => [key, { status: 'pending', detail: '' }]),
+    ));
+    setRefreshReport(null);
     setBusy(true);
 
     try {
-      const result = await api.analyzeProposal({
-        company_id: company.id,
-        title: title.trim(),
-        description: description.trim(),
-        include_fresh_external_research: includeFreshResearch,
-        include_authorized_internal: includeInternal,
+      const result = await runProposalWorkflow({
+        api,
+        company,
+        proposal: { title, description },
+        includeFreshResearch,
+        includeInternal,
+        onStages: setWorkflowStages,
+        onRefreshData,
+        onProposalSaved: (savedProposal) => {
+          setSelectedProposal(savedProposal);
+          setHistoryReload((value) => value + 1);
+        },
       });
 
-      setSelectedProposal({
-        id: result.proposal_id,
-        company_id: company.id,
-        title: title.trim(),
-        description: description.trim(),
-        status: 'submitted',
-      });
-
-      setAnalysis(result);
+      setSelectedProposal(result.proposal);
+      setAnalysis(result.analysis);
+      setRefreshReport(result.refresh);
       setHistoryReload((value) => value + 1);
     } catch (requestError) {
       setError(requestError.message || 'Proposal analysis failed.');
@@ -472,8 +495,9 @@ export default function ProposalAnalysis({ company }) {
           <Lightbulb size={20} />
         </div>
         <p>
-          Analysis uses relevant saved evidence by default. Fresh external
-          research is optional and may add time.
+          Analyze and Save first refreshes this company's bounded public
+          research and document processing, then analyzes the proposal against
+          persisted evidence. Existing records remain available during refresh.
         </p>
 
         <form className="proposal-form" onSubmit={submit}>
@@ -497,7 +521,7 @@ export default function ProposalAnalysis({ company }) {
             required
           />
 
-          {draftEdited && (
+          {draftEdited && !selectedProposal && (
             <small className="proposal-draft-note">
               Draft · not saved yet. Submit the proposal to retain it in company history.
             </small>
@@ -532,7 +556,7 @@ export default function ProposalAnalysis({ company }) {
             disabled={busy || description.trim().length < 20}
           >
             {busy
-              ? <><LoaderCircle className="spin" size={16} /> Analyzing evidence…</>
+              ? <><LoaderCircle className="spin" size={16} /> Refreshing company intelligence…</>
               : <><Sparkles size={16} /> Analyze and save proposal</>}
           </button>
         </form>
@@ -545,9 +569,30 @@ export default function ProposalAnalysis({ company }) {
       )}
 
       {busy && (
-        <div className="loading-panel" role="status">
-          <LoaderCircle className="spin" size={20} />
-          Retrieving evidence and running proposal analysis. Your proposal is saved before analysis starts.
+        <div className="proposal-workflow-progress" role="status" aria-live="polite">
+          <h3><LoaderCircle className="spin" size={17} /> Refreshing {company.name} intelligence</h3>
+          <ol>
+            {WORKFLOW_STAGES.map(([key, label]) => {
+              const item = workflowStages?.[key] || { status: 'pending' };
+              return (
+                <li key={key} className={`workflow-stage ${item.status}`}>
+                  <span className="workflow-stage-indicator" aria-hidden="true" />
+                  <span>{label}</span>
+                  <strong>{item.status.replaceAll('_', ' ')}</strong>
+                  {item.detail ? <small>{item.detail}</small> : null}
+                </li>
+              );
+            })}
+          </ol>
+          <p>Source discovery, ingestion and relationship failures are reported as partial results; they do not replace persisted evidence.</p>
+        </div>
+      )}
+
+      {refreshReport?.status === 'partial' && (
+        <div className="proposal-refresh-warning" role="status">
+          <strong>Analysis completed with a partial intelligence refresh.</strong>
+          <p>The recommendation uses evidence already persisted for this company. Review refresh status before treating the collection as complete.</p>
+          {refreshReport.errors?.length ? <ul>{refreshReport.errors.map((item) => <li key={item}>{item}</li>)}</ul> : null}
         </div>
       )}
 
@@ -573,10 +618,15 @@ export default function ProposalAnalysis({ company }) {
             <>
               {isReopened && (
                 <p className="proposal-persistence-note">
-                  Reopened from saved company history. Recommendation, risks,
-                  limitations and source-linked claims were retained. The
-                  original graph context, feedback selection and retrieved
-                  passages are not currently stored as analysis snapshots.
+                  {analysis.evidence_snapshot_available
+                    ? `Reopened with the evidence and public graph context captured at ${formatDate(analysis.snapshot_captured_at)}. Public source-linked feedback is shown where it was included in the snapshot.`
+                    : 'Historical evidence snapshot unavailable. The recommendation, risks, limitations and source links may remain, while graph and feedback context below is refreshed from current public records.'}
+                </p>
+              )}
+
+              {!hasVerifiedProposalClaims(analysis) && (
+                <p className="proposal-verification-warning" role="note">
+                  No factual claims in this analysis passed citation verification. Treat the recommendation and risks as AI-generated judgment, not verified company facts.
                 </p>
               )}
 
@@ -602,8 +652,10 @@ export default function ProposalAnalysis({ company }) {
 
               <section className="proposal-analysis-section">
                 <h3><CheckCircle2 size={17} /> Evidence-linked claims</h3>
-                {analysis.claims?.length ? (
-                  analysis.claims.map((claim, index) => (
+                {analysis.claims?.some((claim) => claim.verification_status === 'verified') ? (
+                  analysis.claims
+                    .filter((claim) => claim.verification_status === 'verified')
+                    .map((claim, index) => (
                     <article className="proposal-claim" key={`${claim.statement}-${index}`}>
                       <p>{claim.statement || 'Claim text unavailable.'}</p>
                       <span>
@@ -632,6 +684,19 @@ export default function ProposalAnalysis({ company }) {
                   <p>No factual claims passed evidence verification.</p>
                 )}
               </section>
+
+              {analysis.unverified_claims?.length > 0 && (
+                <section className="proposal-analysis-section" aria-label="Claims not verified">
+                  <h3><AlertTriangle size={17} /> Claims not verified</h3>
+                  <p>These statements did not have a saved source excerpt that directly supported their complete wording.</p>
+                  {analysis.unverified_claims.map((claim, index) => (
+                    <article className="proposal-claim" key={`${claim.statement}-${index}`}>
+                      <p>{claim.statement || 'Claim text unavailable.'}</p>
+                      <span>{claim.evidence_status || 'Not verified'}</span>
+                    </article>
+                  ))}
+                </section>
+              )}
 
               <section className="proposal-analysis-section">
                 <h3><Search size={17} /> Retrieved evidence and context</h3>

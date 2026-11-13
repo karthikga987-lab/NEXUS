@@ -65,9 +65,15 @@ export const api = {
   companyKnowledgeGraph: (id) => request(`${companyPath(id)}/knowledge-graph`),
   companyFeedbackAnalysis: (id) => request(`/api/feedback/analysis/${encodeURIComponent(id)}`),
   companyFeedbackTrends: (id) => request(`/api/feedback/trends/${encodeURIComponent(id)}`),
-  companyIngestionStatus: (id) => request(`/api/ingestion/companies/${encodeURIComponent(id)}/status`),
-  researchCompany: (id, maxPages = 12, searchDepth = 4) => request(
-    `${companyPath(id)}/research?max_pages=${maxPages}&search_depth=${searchDepth}`,
+  companyFeedbackRecords: async (id) => {
+    const result = await request(`${companyPath(id)}/feedback`);
+    return Array.isArray(result) ? result : Array.isArray(result?.items) ? result.items : null;
+  },
+  companyIngestionStatus: (id, includeAuthorizedInternal = false) => request(
+    `/api/ingestion/companies/${encodeURIComponent(id)}/status${includeAuthorizedInternal ? '?include_authorized_internal=true' : ''}`,
+  ),
+  researchCompany: (id, maxPages = 12, searchDepth = 4, background = false) => request(
+    `${companyPath(id)}/research?max_pages=${maxPages}&search_depth=${searchDepth}&background=${background}`,
     { method: 'POST' },
   ),
   processCompanySources: (id, sourceIds = null, includeAuthorizedInternal = false) => request(
@@ -78,6 +84,10 @@ export const api = {
     },
   ),
   submitFeedback: (payload) => request('/api/feedback', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }),
+  createProposal: (payload) => request('/api/proposals', {
     method: 'POST',
     body: JSON.stringify(payload),
   }),

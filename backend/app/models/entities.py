@@ -109,7 +109,7 @@ class Company(Base):
         Text, nullable=True
     )
     research_status: Mapped[str] = mapped_column(
-        String(40), default="pending"
+        String(40), default="not_started"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now
@@ -221,6 +221,39 @@ class SourceDocument(Base):
         metadata = self.source_metadata if isinstance(self.source_metadata, dict) else {}
         evidence = metadata.get("extracted_event_evidence")
         return evidence if isinstance(evidence, list) else []
+
+    @property
+    def processing_failed_stage(self) -> str | None:
+        metadata = self.source_metadata if isinstance(self.source_metadata, dict) else {}
+        value = metadata.get("ingestion_failed_stage")
+        allowed = {
+            "source_validation",
+            "source_initialization",
+            "embedding",
+            "event_extraction",
+            "event_persistence",
+            "knowledge_item_persistence",
+            "finalization",
+        }
+        return value if isinstance(value, str) and value in allowed else None
+
+    @property
+    def processing_error(self) -> str | None:
+        if self.processing_status != "failed":
+            return None
+        messages = {
+            "source_validation": "The saved document has no usable text content.",
+            "source_initialization": "The source could not enter document processing.",
+            "embedding": "Embedding generation failed; check the configured embedding service and model.",
+            "event_extraction": "Structured event extraction failed; check the configured Ollama model and response format.",
+            "event_persistence": "An extracted event did not pass persistence validation.",
+            "knowledge_item_persistence": "An extracted knowledge item failed persistence or exact-quote validation.",
+            "finalization": "Document processing could not be finalized.",
+        }
+        return messages.get(
+            self.processing_failed_stage,
+            "Document processing failed; the detailed internal error is not exposed by this endpoint.",
+        )
 
     @property
     def event_date(self) -> datetime | None:
@@ -537,4 +570,19 @@ class AnalysisEvidence(Base):
     claim: Mapped[str] = mapped_column(Text)
     evidence_classification: Mapped[str] = mapped_column(
         String(40), default="unknown"
+    )
+
+
+class ProposalAnalysisSnapshot(Base):
+    """Immutable analysis-time context needed to reopen saved analyses."""
+
+    __tablename__ = "proposal_analysis_snapshots"
+
+    analysis_id: Mapped[str] = mapped_column(
+        ForeignKey("proposal_analyses.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
     )

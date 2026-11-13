@@ -77,13 +77,18 @@ def process_company(
 @router.get("/companies/{company_id}/status")
 def company_ingestion_status(
     company_id: str,
+    request: Request,
+    include_authorized_internal: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
-    """Get the stored document-processing status for a company."""
+    """Get stored processing status for evidence accessible to this caller."""
+    if include_authorized_internal:
+        require_local_internal_access(request)
     try:
         return get_company_ingestion_status(
             db=db,
             company_id=company_id,
+            include_authorized_internal=include_authorized_internal,
         )
 
     except ValueError as exc:

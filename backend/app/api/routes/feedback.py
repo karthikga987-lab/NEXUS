@@ -7,9 +7,10 @@ from sqlalchemy.orm import Session
 from app.feedback.analyzer import analyze_feedback
 from app.feedback.csv_upload import router as csv_upload_router
 from app.db.session import get_db
-from app.models import Company, Feedback
+from app.models import Company, Feedback, SourceDocument
 from app.models.entities import feedback_topics
 from app.schemas.contracts import FeedbackCreate
+from app.feedback.queries import list_public_company_feedback
 
 
 router = APIRouter()
@@ -29,15 +30,39 @@ def create_feedback(
             detail="Company not found",
         )
 
+    source = None
+    if payload.source_id:
+        source = db.get(SourceDocument, payload.source_id)
+        if (
+            source is None
+            or source.company_id != payload.company_id
+            or source.permission_status != "public"
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="source_id must refer to a public source belonging to this company.",
+            )
+        if payload.source_url and payload.source_url not in {
+            source.url,
+            source.original_url,
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail="source_url does not match the selected source record.",
+            )
+
     analysis = analyze_feedback(payload.text)
 
     item = Feedback(
         company_id=payload.company_id,
         feedback_text=payload.text,
         product_name=payload.product_name,
-        source_url=payload.source_url,
+        source_id=source.id if source else None,
+        source_url=(payload.source_url or (source.original_url if source else None)),
+        external_reference=payload.external_reference,
+        language=payload.language,
         rating=payload.rating,
-        created_at_source=payload.feedback_date,
+        created_at_source=payload.created_at_source or payload.feedback_date,
         sentiment=analysis["sentiment"],
         feedback_type=analysis["feedback_type"],
         analysis_status="completed",
@@ -82,11 +107,7 @@ def reanalyze_feedback(
             detail="Company not found",
         )
 
-    items = (
-        db.query(Feedback)
-        .filter(Feedback.company_id == company_id)
-        .all()
-    )
+    items = list_public_company_feedback(db, company_id)
 
     updated = 0
 
@@ -140,11 +161,7 @@ def feedback_analysis(
             detail="Company not found",
         )
 
-    items = (
-        db.query(Feedback)
-        .filter(Feedback.company_id == company_id)
-        .all()
-    )
+    items = list_public_company_feedback(db, company_id)
 
     sentiment_counts = Counter(
         item.sentiment or "unknown"
@@ -186,11 +203,7 @@ def feedback_trends(
             detail="Company not found",
         )
 
-    items = (
-        db.query(Feedback)
-        .filter(Feedback.company_id == company_id)
-        .all()
-    )
+    items = list_public_company_feedback(db, company_id)
 
     if not items:
         return {
@@ -247,10 +260,17 @@ def feedback_trends(
         trends[topic]["evidence"].append({
             "feedback_id": item.id,
             "feedback_text": item.feedback_text,
+            "product_name": item.product_name,
             "sentiment": sentiment,
             "rating": item.rating,
-            "source_url": item.source_url,
             "source_id": item.source_id,
+            "source_url": item.source_url,
+            "external_reference": item.external_reference,
+            "language": item.language,
+            "created_at_source": item.created_at_source,
+            "collected_at": item.collected_at,
+            "feedback_type": item.feedback_type,
+            "analysis_status": item.analysis_status,
         })
 
     return {

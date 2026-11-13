@@ -45,6 +45,11 @@ export default function ResearchSources({
   }), [sources, search, activeType]);
   const counts = stats?.latest_run?.counts || {};
   const ingestionCounts = ingestion?.processing_status_counts || {};
+  const researchFailureCount = stats ? (counts.failed ?? 0) : null;
+  const ingestionFailureCount = ingestion ? (ingestionCounts.failed ?? 0) : null;
+  const researchSkippedCount = stats
+    ? (counts.skipped ?? 0) + (counts.skipped_duplicates ?? 0)
+    : null;
   const processedCount = ingestionCounts.processed ?? ingestionCounts.completed ?? null;
   const totalReports = (sources || []).filter((source) => String(source.source_type || "").toLowerCase().includes("report")).length;
   const totalTypes = new Set((sources || []).map((source) => source.source_type).filter(Boolean)).size;
@@ -84,9 +89,11 @@ export default function ResearchSources({
         <article><span>URLs discovered</span><strong>{counts.discovered ?? '—'}</strong></article>
         <article><span>Documents collected</span><strong>{counts.collected ?? (sources ? sources.filter((item) => item.content_kind !== 'search_snippet').length : '—')}</strong></article>
         <article><span>Processed</span><strong>{processedCount ?? '—'}</strong></article>
-        <article><span>Failed</span><strong>{(counts.failed ?? 0) + (ingestionCounts.failed ?? 0)}</strong></article>
-        <article><span>Skipped</span><strong>{(counts.skipped_duplicates ?? 0) + (ingestionCounts.skipped ?? 0)}</strong></article>
+        <article><span>Research fetch failures</span><strong>{researchFailureCount ?? '—'}</strong></article>
+        <article><span>Ingestion failures</span><strong>{ingestionFailureCount ?? '—'}</strong></article>
+        <article><span>Research URLs skipped</span><strong>{researchSkippedCount ?? '—'}</strong></article>
       </section>
+      {stats?.latest_run?.failure_summary && <p className="unavailable-note">Latest research run: {stats.latest_run.failure_summary}</p>}
 
       <details className="internal-import-panel">
         <summary><ShieldCheck size={17} /> Import authorized local documents</summary>
@@ -151,7 +158,7 @@ export default function ResearchSources({
                   </div>
                   {snippetOnly && <p className="unavailable-note">Search snippet only. It is a discovery lead, not a collected document or evidence passage.</p>}
                   {source.content_excerpt && <details><summary>Supporting excerpt</summary><blockquote>{source.content_excerpt}</blockquote></details>}
-                  {source.processing_status === 'failed' && <p className="unavailable-note">This source failed processing. Detailed diagnostics are not exposed by the current source response.</p>}
+                  {source.processing_status === 'failed' && <p className="unavailable-note">Processing failed{source.processing_failed_stage ? ` during ${source.processing_failed_stage.replaceAll('_', ' ')}` : ''}: {source.processing_error || 'Safe failure details are unavailable.'}</p>}
                 </div>
               </article>
             );

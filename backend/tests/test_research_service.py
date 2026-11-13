@@ -4,6 +4,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db.session import Base
 from app.models import Company, SourceDocument
 from app.research import service
+from app.research.discovery import SourceDiscoveryError
 
 
 def _database(tmp_path):
@@ -115,6 +116,74 @@ def test_missing_html_is_failed_without_page_extraction(
             "reason": "Request timed out.",
         }
         assert db.query(SourceDocument).count() == 0
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_unavailable_official_homepage_falls_back_to_search_candidates(
+    tmp_path, monkeypatch
+):
+    engine, db = _database(tmp_path)
+    try:
+        company = Company(
+            name="[SYNTHETIC] boAt research fallback test",
+            website="https://boat.example",
+        )
+        db.add(company)
+        db.commit()
+        article_url = "https://news.example/boat-product-announcement"
+        candidate = {
+            "url": article_url,
+            "original_url": article_url,
+            "title": "[SYNTHETIC] boAt product announcement",
+            "snippet": "Synthetic discovery snippet, not source evidence.",
+            "source_category": "industry_reporting",
+            "discovery_method": "ddgs",
+            "evidence_origin": "external_public",
+        }
+
+        def unavailable_official_homepage(**_kwargs):
+            raise SourceDiscoveryError(
+                "The company homepage could not be fetched as valid HTML."
+            )
+
+        def search_fallback(_company, *, official_urls, **_kwargs):
+            assert official_urls == []
+            return [candidate], []
+
+        monkeypatch.setattr(
+            service, "discover_sources", unavailable_official_homepage
+        )
+        monkeypatch.setattr(
+            service, "discover_company_candidates", search_fallback
+        )
+        monkeypatch.setattr(
+            service,
+            "fetch_url_with_diagnostics",
+            lambda _url: {"content": "<html>synthetic</html>", "reason": None},
+        )
+        monkeypatch.setattr(
+            service,
+            "extract_page",
+            lambda **_kwargs: {
+                "title": "[SYNTHETIC] boAt product announcement",
+                "content_text": (
+                    "[SYNTHETIC] boAt documented this test announcement. "
+                    + "Product feature update for the test fixture. " * 45
+                ),
+            },
+        )
+
+        result = service.collect_company_sources(db, company.id)
+
+        assert result["counts"]["collected"] == 1
+        assert result["counts"]["created"] == 1
+        assert result["counts"]["failed"] == 0
+        saved = db.query(SourceDocument).one()
+        assert saved.url == article_url
+        assert saved.source_metadata["discovery_method"] == "ddgs"
+        assert saved.source_metadata["evidence_origin"] == "external_public"
     finally:
         db.close()
         engine.dispose()

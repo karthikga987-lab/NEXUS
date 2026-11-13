@@ -12,7 +12,7 @@ function formatDate(value) {
   return Number.isNaN(date.getTime()) ? 'Date unavailable' : date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
-export default function CustomerIntelligence({ companyId, feedback, analysis, loading = false, onSubmitFeedback }) {
+export default function CustomerIntelligence({ companyId, feedback, feedbackRecords = null, analysis, loading = false, onSubmitFeedback }) {
   const [search, setSearch] = useState('');
   const [activeSentiment, setActiveSentiment] = useState('All');
   const [selectedFeedback, setSelectedFeedback] = useState(null);
@@ -23,6 +23,13 @@ export default function CustomerIntelligence({ companyId, feedback, analysis, lo
   const [formMessage, setFormMessage] = useState('');
 
   const records = useMemo(() => {
+    if (Array.isArray(feedbackRecords)) {
+      return feedbackRecords.map((item) => ({
+        ...item,
+        feedback_id: item.feedback_id || item.id,
+        topics: Array.isArray(item.topics) ? item.topics : [],
+      }));
+    }
     const byId = new Map();
     (feedback?.trends || []).forEach((trend) => (trend.evidence || []).forEach((item) => {
       const id = item.feedback_id || `${trend.topic}:${item.feedback_text}`;
@@ -31,7 +38,7 @@ export default function CustomerIntelligence({ companyId, feedback, analysis, lo
       else byId.set(id, { ...item, topics: [trend.topic] });
     }));
     return [...byId.values()];
-  }, [feedback]);
+  }, [feedback, feedbackRecords]);
 
   const filteredFeedback = useMemo(() => records.filter((item) => {
     const sentiment = String(item.sentiment || 'unknown').toLowerCase();
@@ -49,7 +56,10 @@ export default function CustomerIntelligence({ companyId, feedback, analysis, lo
   const classifiedCount = positiveCount + negativeCount + neutralCount + mixedCount + unknownCount;
   const topicItems = (feedback?.trends || []).map((trend) => ({ name: trend.topic || 'Unclassified', count: Number(trend.total_feedback || 0) }));
   const highestTopicCount = Math.max(1, ...topicItems.map((topic) => topic.count));
-  const totalFeedback = feedback?.total_feedback;
+  const hasFeedbackData = feedback != null || Array.isArray(feedbackRecords);
+  const totalFeedback = Array.isArray(feedbackRecords)
+    ? feedbackRecords.length
+    : feedback?.total_feedback;
   const percentages = classifiedCount ? {
     positive: Math.round((positiveCount / classifiedCount) * 100),
     neutral: Math.round((neutralCount / classifiedCount) * 100),
@@ -78,15 +88,15 @@ export default function CustomerIntelligence({ companyId, feedback, analysis, lo
     <div className="customer-page">
       <div className="customer-heading">
         <div><span className="customer-eyebrow">CUSTOMER INTELLIGENCE</span><h2>Submitted feedback</h2><p>Company-provided records and heuristic classifications; public review discovery is not enabled.</p></div>
-        <div className="customer-live-label"><span />{feedback ? 'Company API data' : loading ? 'Loading' : 'Data unavailable'}</div>
+        <div className="customer-live-label"><span />{hasFeedbackData ? 'Company API data' : loading ? 'Loading' : 'Data unavailable'}</div>
       </div>
 
       <div className="customer-stats">
         {[
           ['Total feedback', totalFeedback ?? '—', 'Company records', MessageSquare],
-          ['Positive', feedback ? positiveCount : '—', 'Heuristic label', ThumbsUp],
-          ['Negative', feedback ? negativeCount : '—', 'Heuristic label', ThumbsDown],
-          ['Neutral', feedback ? neutralCount : '—', 'Heuristic label', Minus],
+          ['Positive', hasFeedbackData ? positiveCount : '—', 'Heuristic label', ThumbsUp],
+          ['Negative', hasFeedbackData ? negativeCount : '—', 'Heuristic label', ThumbsDown],
+          ['Neutral', hasFeedbackData ? neutralCount : '—', 'Heuristic label', Minus],
         ].map(([label, value, note, Icon]) => <div className="customer-stat-card" key={label}><div className="customer-stat-top"><span>{label}</span><Icon size={17} /></div><h2>{value}</h2><p>{note}</p></div>)}
       </div>
 
@@ -119,16 +129,16 @@ export default function CustomerIntelligence({ companyId, feedback, analysis, lo
       </section>
 
       <section className="customer-panel feedback-explorer">
-        <div className="customer-section-heading explorer-heading"><div><h3>Feedback explorer</h3><p>Search and inspect evidence included in the company API response.</p></div><span className="feedback-total">{feedback ? `${filteredFeedback.length} records` : 'Unavailable'}</span></div>
+        <div className="customer-section-heading explorer-heading"><div><h3>Feedback explorer</h3><p>Search and inspect company-scoped submitted feedback records.</p></div><span className="feedback-total">{hasFeedbackData ? `${filteredFeedback.length} records` : 'Unavailable'}</span></div>
         <div className="customer-toolbar"><div className="customer-search"><Search size={17} /><input type="search" aria-label="Search feedback" placeholder="Search product, topic or feedback…" value={search} onChange={(event) => setSearch(event.target.value)} /></div></div>
         <div className="customer-filters">{sentimentFilters.map((sentiment) => <button type="button" key={sentiment} className={activeSentiment === sentiment ? 'customer-filter active' : 'customer-filter'} onClick={() => setActiveSentiment(sentiment)}>{sentiment}</button>)}</div>
-        {loading && !feedback ? <div className="customer-empty" role="status">Loading feedback analysis…</div> : !feedback ? <div className="customer-empty" role="alert"><h3>Feedback unavailable</h3><p>The feedback API did not return company data.</p></div> : filteredFeedback.length ? <div className="customer-feedback-list">{filteredFeedback.map((item) => {
+        {loading && !hasFeedbackData ? <div className="customer-empty" role="status">Loading feedback analysis…</div> : !hasFeedbackData ? <div className="customer-empty" role="alert"><h3>Feedback unavailable</h3><p>The feedback API did not return company data.</p></div> : filteredFeedback.length ? <div className="customer-feedback-list">{filteredFeedback.map((item) => {
           const sentiment = String(item.sentiment || 'unknown').toLowerCase();
           const SentimentIcon = sentimentIcons[sentiment] || Minus;
           return <article className="feedback-card" key={item.feedback_id || item.feedback_text}>
             <div className="feedback-card-top"><div className="feedback-customer-info"><div className="feedback-avatar">{String(item.product_name || 'F').slice(0, 1).toUpperCase()}</div><div><h4>{item.product_name || 'Submitted feedback'}</h4><span className="feedback-category">{(item.topics || ['general']).join(', ')}</span></div></div><span className={`feedback-sentiment ${sentiment}`}><SentimentIcon size={14} />{sentiment}</span></div>
             <p className="feedback-message">{item.feedback_text || 'Feedback text unavailable.'}</p>
-            <div className="feedback-card-bottom"><span><CalendarDays size={14} />Rating {item.rating == null ? 'unavailable' : `${item.rating}/5`}</span><button type="button" onClick={() => setSelectedFeedback(item)}>View details</button></div>
+            <div className="feedback-card-bottom"><span><CalendarDays size={14} />{formatDate(item.created_at_source || item.collected_at)}</span><span>Rating {item.rating == null ? 'unavailable' : `${item.rating}/5`}</span><button type="button" onClick={() => setSelectedFeedback(item)}>View details</button></div>
           </article>;
         })}</div> : <div className="customer-empty"><Search size={25} /><h3>{records.length ? 'No feedback matches this filter' : 'No feedback records available'}</h3><p>{records.length ? 'Try another search or sentiment filter.' : 'Submit a customer record to begin analysis.'}</p></div>}
       </section>
@@ -139,7 +149,8 @@ export default function CustomerIntelligence({ companyId, feedback, analysis, lo
         <div className="feedback-modal-heading"><div><span className="customer-eyebrow">FEEDBACK DETAILS</span><h3 id="feedback-dialog-title">{selectedFeedback.product_name || 'Submitted feedback'}</h3></div><button type="button" className="feedback-close" onClick={() => setSelectedFeedback(null)} aria-label="Close feedback details">×</button></div>
         <div className="feedback-modal-meta"><span>{(selectedFeedback.topics || ['general']).join(', ')}</span><span className={`feedback-sentiment ${String(selectedFeedback.sentiment || 'unknown').toLowerCase()}`}>{selectedFeedback.sentiment || 'unknown'}</span></div>
         <div className="feedback-modal-message"><span>Submitted feedback</span><p>{selectedFeedback.feedback_text || 'Unavailable'}</p></div>
-        <div className="feedback-modal-date"><CalendarDays size={15} />Rating {selectedFeedback.rating == null ? 'unavailable' : `${selectedFeedback.rating}/5`}</div>
+        <div className="feedback-modal-date"><CalendarDays size={15} />Source date {formatDate(selectedFeedback.created_at_source)} · Collected {formatDate(selectedFeedback.collected_at)}</div>
+        <div className="feedback-modal-date">Rating {selectedFeedback.rating == null ? 'unavailable' : `${selectedFeedback.rating}/5`} · {selectedFeedback.feedback_type || 'Type unavailable'} · {selectedFeedback.language || 'Language unavailable'}</div>
         {selectedFeedback.source_url && <a href={selectedFeedback.source_url} target="_blank" rel="noreferrer">Open supplied source</a>}
         <button type="button" className="feedback-modal-done" onClick={() => setSelectedFeedback(null)}>Close details</button>
       </div></div>}

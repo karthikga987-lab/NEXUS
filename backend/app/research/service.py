@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 
 from app.models import Company, ResearchRun
-from app.research.discovery import discover_company_candidates, discover_sources
+from app.research.discovery import (
+    SourceDiscoveryError,
+    discover_company_candidates,
+    discover_sources,
+)
 from app.research.fetcher import fetch_url_with_diagnostics
 from app.research.persistence import save_search_snippet, save_source
 from app.research.processor import extract_page
@@ -214,6 +218,7 @@ def collect_company_sources(
     homepage_html: str | None = None,
     search_depth: int = 4,
     searcher=None,
+    research_run_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Discover, fetch, extract, quality-check and persist public pages.
@@ -451,17 +456,27 @@ def collect_company_sources(
         if counts["failed"] or discovery_errors
         else "completed"
     )
-    db.add(ResearchRun(
-        company_id=company_id,
-        status=result_status,
-        started_at=started_at,
-        completed_at=datetime.now(timezone.utc),
-        counts=dict(counts),
-        failure_summary=("; ".join(discovery_errors)[:500] if discovery_errors else (
-            f"{counts['failed']} source fetch/processing failure(s)"
-            if counts["failed"] else None
-        )),
-    ))
+    failure_summary = "; ".join(discovery_errors)[:500] if discovery_errors else (
+        f"{counts['failed']} source fetch/processing failure(s)"
+        if counts["failed"] else None
+    )
+    if research_run_id is not None:
+        run = db.get(ResearchRun, research_run_id)
+        if run is None or run.company_id != company_id:
+            raise ValueError("Research run does not belong to this company.")
+        run.status = result_status
+        run.completed_at = datetime.now(timezone.utc)
+        run.counts = dict(counts)
+        run.failure_summary = failure_summary
+    else:
+        db.add(ResearchRun(
+            company_id=company_id,
+            status=result_status,
+            started_at=started_at,
+            completed_at=datetime.now(timezone.utc),
+            counts=dict(counts),
+            failure_summary=failure_summary,
+        ))
     db.commit()
 
     return {

@@ -7,18 +7,22 @@ import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal, get_db
 from app.core.local_access import require_local_internal_access
-from app.models import Company, Proposal, SourceDocument
+from app.models import Company, ProductEvent, Proposal, SourceDocument
 from app.models.entities import (
     ProposalAnalysis,
+    ProposalAnalysisSnapshot,
     AnalysisEvidence,
     Feedback,
+    analysis_events,
+    analysis_feedback,
     feedback_topics,
 )
-from app.schemas.contracts import ProposalAnalyzeIn
+from app.schemas.contracts import ProposalAnalyzeIn, ProposalCreateIn
 
 from app.intelligence.embeddings import (
     EmbeddingError,
@@ -26,6 +30,10 @@ from app.intelligence.embeddings import (
     search_external_public_chunks,
 )
 from app.intelligence.knowledge_retrieval import append_relevant_knowledge_item_passages
+from app.intelligence.claim_verification import (
+    claim_quote_support_failures,
+    claim_quote_supports_complete_statement,
+)
 from app.intelligence.proposal_analysis import (
     ProposalAnalysisError,
     analyze_proposal_with_evidence,
@@ -57,6 +65,290 @@ if not -1.0 <= PROPOSAL_INTERNAL_MIN_SIMILARITY <= 1.0:
 router = APIRouter()
 
 MAX_CUSTOMER_FEEDBACK = 30
+ANALYSIS_SNAPSHOT_TABLE = "proposal_analysis_snapshots"
+
+
+def _json_safe(value):
+    """Convert ORM/AI context values into stable JSON-compatible values."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _snapshot_storage_available(db: Session) -> bool:
+    """Allow this code to keep serving a pre-migration local database."""
+    return sqlalchemy_inspect(db.get_bind()).has_table(ANALYSIS_SNAPSHOT_TABLE)
+
+
+def _snapshot_is_public(snapshot: dict | None) -> bool:
+    if not isinstance(snapshot, dict):
+        return True
+    passages = snapshot.get("documentary_evidence", [])
+    if not isinstance(passages, list):
+        return False
+    return all(
+        isinstance(item, dict) and item.get("permission_status") == "public"
+        for item in passages
+    )
+
+
+def _build_analysis_snapshot(
+    *,
+    db: Session,
+    proposal: Proposal,
+    analysis_result: dict,
+    internal_evidence: list[dict],
+    external_evidence: list[dict],
+    graph_context: dict,
+    customer_feedback: list[dict],
+    relevant_customer_feedback: list[dict],
+    external_research: dict,
+    captured_at: datetime,
+) -> dict:
+    """Capture the exact retrieved passages and context used for analysis."""
+    documentary_evidence = []
+    source_cache: dict[str, SourceDocument | None] = {}
+    evidence_items = [
+        *((item, item.get("evidence_scope", "public_company"))
+          for item in internal_evidence),
+        *((item, "external") for item in external_evidence),
+    ]
+    passages_by_source: dict[str, list[str]] = {}
+    for item, _scope in evidence_items:
+        source_id = item.get("source_id")
+        passage = item.get("chunk_text")
+        if isinstance(source_id, str) and isinstance(passage, str) and passage.strip():
+            passages_by_source.setdefault(source_id, []).append(passage)
+
+    verified_claims = []
+    unverified_claims = []
+    for claim in analysis_result.get("claims", []):
+        if not isinstance(claim, dict):
+            continue
+        statement = claim.get("statement")
+        if not isinstance(statement, str) or not statement.strip():
+            continue
+        source_ids = claim.get("source_ids", [])
+        if not isinstance(source_ids, list):
+            source_ids = []
+        candidate_evidence = []
+        valid_supports = []
+        for support in claim.get("supporting_evidence", []):
+            if not isinstance(support, dict):
+                continue
+            source_id = support.get("source_id")
+            quote = support.get("supporting_quote")
+            if not isinstance(source_id, str) or not isinstance(quote, str):
+                continue
+            source_ids = [*source_ids, source_id]
+            source_passages = passages_by_source.get(source_id, [])
+            matching_passage = next((
+                passage for passage in source_passages
+                if (
+                    claim_quote_supports_complete_statement(
+                        statement, quote, passage
+                    )
+                    and (
+                        support.get("verification_method")
+                        in {
+                            "exact_passage_match",
+                            "company_contextual_passage_match",
+                            "llm_quote_only_semantic_validation",
+                        }
+                        or " ".join(statement.split()).casefold()
+                        == " ".join(quote.split()).casefold()
+                    )
+                )
+            ), None)
+            if matching_passage is not None:
+                valid_supports.append({
+                    "source_id": source_id,
+                    "supporting_quote": quote,
+                    "verification_method": support.get("verification_method"),
+                })
+            else:
+                failures = claim_quote_support_failures(
+                    statement,
+                    quote,
+                    source_passages[0] if source_passages else "",
+                )
+                candidate_evidence.append({
+                    "source_id": source_id,
+                    "supporting_quote": quote,
+                    "rejection_reasons": failures or ["quote_not_in_retrieved_passage"],
+                })
+
+        model_marked_verified = claim.get("verification_status") == "verified"
+        if model_marked_verified and valid_supports:
+            verified_claims.append({
+                "statement": statement,
+                "type": claim.get("type"),
+                "source_ids": list(dict.fromkeys(
+                    item["source_id"] for item in valid_supports
+                )),
+                "evidence_status": claim.get("evidence_status"),
+                "verification_status": "verified",
+                "evidence_scope": claim.get("evidence_scope"),
+                "supporting_evidence": valid_supports,
+            })
+        else:
+            unverified_claims.append({
+                "statement": statement,
+                "type": claim.get("type"),
+                "verification_status": "unverified",
+                "evidence_status": (
+                    "claim_level_excerpt_insufficient"
+                    if model_marked_verified else claim.get("evidence_status", "not_verified")
+                ),
+                "candidate_source_ids": list(dict.fromkeys(source_ids)),
+                "candidate_evidence": candidate_evidence,
+            })
+
+    for item, scope in evidence_items:
+        source_id = item.get("source_id")
+        if not isinstance(source_id, str):
+            continue
+        if source_id not in source_cache:
+            source_cache[source_id] = db.get(SourceDocument, source_id)
+        source = source_cache[source_id]
+        if source is None:
+            continue
+
+        company = db.get(Company, source.company_id)
+        passage = item.get("chunk_text")
+        if not isinstance(passage, str):
+            passage = ""
+        source_verified_claims = []
+        for claim in verified_claims:
+            for support in claim.get("supporting_evidence", []):
+                quote = support.get("supporting_quote")
+                if (
+                    support.get("source_id") == source_id
+                    and isinstance(quote, str)
+                    and claim_quote_supports_complete_statement(
+                        claim["statement"], quote, passage
+                    )
+                ):
+                    source_verified_claims.append({
+                        "statement": claim.get("statement"),
+                        "type": claim.get("type"),
+                        "verification_status": "verified",
+                        "supporting_quote": quote,
+                        "verification_method": support.get("verification_method"),
+                    })
+
+        metadata = source.source_metadata if isinstance(source.source_metadata, dict) else {}
+        documentary_evidence.append({
+            **_format_evidence(item, scope),
+            "source_url": source.original_url,
+            "publisher": source.publisher,
+            "source_type": source.source_type,
+            "publication_date": (
+                source.publication_date.isoformat()
+                if source.publication_date is not None else None
+            ),
+            "source_collected_at": source.collected_at.isoformat(),
+            "source_company_id": source.company_id,
+            "source_company_name": company.name if company else item.get("source_company_name"),
+            "permission_status": source.permission_status,
+            "evidence_origin": item.get("evidence_origin") or source.evidence_origin,
+            "retrieved_at": captured_at.isoformat(),
+            "verification_status": (
+                "verified_claim_excerpt" if source_verified_claims else "retrieved_context_only"
+            ),
+            "verified_claims": source_verified_claims,
+            "evidence_classification": "documented" if source_verified_claims else "unknown",
+            "discovery_method": metadata.get("discovery_method"),
+        })
+
+    public_feedback = _get_customer_feedback(
+        db=db,
+        company_id=proposal.company_id,
+        public_only=True,
+    )
+    public_feedback_ids = {item.get("feedback_id") for item in public_feedback}
+    snapshotted_feedback = [
+        item for item in relevant_customer_feedback
+        if item.get("feedback_id") in public_feedback_ids
+    ]
+    feedback_context = {
+        "feedback_count": len(snapshotted_feedback),
+        "total_company_feedback_available": len(public_feedback),
+        "feedback": _json_safe(snapshotted_feedback),
+        "snapshot_scope": "completed feedback linked to public source documents",
+        "snapshot_complete_for_analysis_input": (
+            len(snapshotted_feedback) == len(relevant_customer_feedback)
+        ),
+        "interpretation_warning": (
+            "Feedback is a separate customer signal, not documentary proof of "
+            "product events, business outcomes or causation. Sentiment and "
+            "topic labels are heuristic. Only public source-linked records are "
+            "included in this saved snapshot."
+        ),
+    }
+
+    return _json_safe({
+        "version": 1,
+        "captured_at": captured_at.isoformat(),
+        "proposal": {
+            "id": proposal.id,
+            "company_id": proposal.company_id,
+            "title": proposal.title,
+            "description": proposal.description,
+            "status": proposal.status,
+        },
+        "documentary_evidence": documentary_evidence,
+        "verified_claims": verified_claims,
+        "unverified_claims": unverified_claims,
+        "company_knowledge_context": graph_context,
+        "customer_feedback_context": feedback_context,
+        "feedback_input_count": len(relevant_customer_feedback),
+        "external_research": {
+            "status": external_research.get("status"),
+            "requested": bool(external_research.get("requested")),
+            "evidence_origin": external_research.get("evidence_origin"),
+            "sources_collected": external_research.get("sources_collected", 0),
+            "sources_processed": external_research.get("sources_processed", 0),
+            "cached_results_used": external_research.get("cached_results_used", 0),
+        },
+        "context_retrieval_mode": "analysis_time_snapshot",
+    })
+
+
+@router.post("", status_code=201)
+def create_proposal(
+    payload: ProposalCreateIn,
+    db: Session = Depends(get_db),
+):
+    """Persist a company-scoped proposal before a long intelligence refresh."""
+    company = db.get(Company, payload.company_id)
+    if company is None:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    proposal = Proposal(
+        company_id=company.id,
+        title=payload.title,
+        description=payload.description,
+        status="submitted",
+    )
+    db.add(proposal)
+    db.commit()
+    db.refresh(proposal)
+    return {
+        "id": proposal.id,
+        "company_id": proposal.company_id,
+        "title": proposal.title,
+        "description": proposal.description,
+        "status": proposal.status,
+        "created_at": proposal.created_at,
+        "updated_at": proposal.updated_at,
+    }
 
 
 @router.get("/company/{company_id}", status_code=200)
@@ -104,6 +396,17 @@ def list_company_proposals(
                 .all()
             )
         }
+        if _snapshot_storage_available(db):
+            snapshot_rows = (
+                db.query(ProposalAnalysisSnapshot)
+                .filter(ProposalAnalysisSnapshot.analysis_id.in_(analysis_ids))
+                .all()
+            )
+            restricted_analysis_ids.update(
+                row.analysis_id
+                for row in snapshot_rows
+                if not _snapshot_is_public(row.snapshot)
+            )
 
     analyses_by_proposal = {}
     for analysis in analyses:
@@ -457,15 +760,22 @@ def analyze_proposal(
     request_started = time.perf_counter()
 
     try:
-        proposal = Proposal(
-            company_id=payload.company_id,
-            title=payload.title,
-            description=payload.description,
-            status="submitted",
-        )
-
-        db.add(proposal)
-        db.flush()
+        if payload.proposal_id:
+            proposal = db.get(Proposal, payload.proposal_id)
+            if proposal is None or proposal.company_id != payload.company_id:
+                raise HTTPException(status_code=404, detail="Saved proposal not found")
+            proposal.title = payload.title
+            proposal.description = payload.description
+            proposal.status = "submitted"
+        else:
+            proposal = Proposal(
+                company_id=payload.company_id,
+                title=payload.title,
+                description=payload.description,
+                status="submitted",
+            )
+            db.add(proposal)
+            db.flush()
 
         # Persist the submitted proposal before starting independent
         # research. This releases SQLite's write transaction before
@@ -862,6 +1172,13 @@ def analyze_proposal(
                 "with the proposal title or description was identified."
             )
 
+        snapshot_storage_available = _snapshot_storage_available(db)
+        if not snapshot_storage_available:
+            limitations.append(
+                "Analysis-time evidence snapshots are not persisted because "
+                "the additive proposal snapshot migration has not been applied."
+            )
+
         if relevant_customer_feedback:
             limitations.append(
                 "Proposal-relevant feedback was selected using lexical "
@@ -896,12 +1213,40 @@ def analyze_proposal(
         analysis.completed_at = datetime.now(timezone.utc)
         db.flush()
 
+        analysis_snapshot = _build_analysis_snapshot(
+            db=db,
+            proposal=proposal,
+            analysis_result=analysis_result,
+            internal_evidence=internal_evidence,
+            external_evidence=external_evidence,
+            graph_context=graph_context,
+            customer_feedback=customer_feedback,
+            relevant_customer_feedback=relevant_customer_feedback,
+            external_research=external_research,
+            captured_at=analysis.completed_at,
+        )
+
+        if snapshot_storage_available:
+            db.add(ProposalAnalysisSnapshot(
+                analysis_id=analysis.id,
+                snapshot=analysis_snapshot,
+                captured_at=analysis.completed_at,
+            ))
+
         # Persist only source-linked claims.
         # Customer feedback is not stored as documentary evidence.
         persisted_pairs = set()
 
-        for claim in analysis_result.get("claims", []):
-            for source_id in claim["source_ids"]:
+        for claim in analysis_snapshot.get("verified_claims", []):
+            if (
+                not isinstance(claim, dict)
+                or claim.get("verification_status") != "verified"
+                or not claim.get("supporting_evidence")
+            ):
+                continue
+            for source_id in claim.get("source_ids", []):
+                if source_id not in eligible_internal_ids | eligible_external_ids:
+                    continue
                 pair = (claim["statement"], source_id)
 
                 if pair in persisted_pairs:
@@ -915,9 +1260,55 @@ def analyze_proposal(
                         source_id=source_id,
                         event_id=None,
                         claim=claim["statement"],
-                        evidence_classification="unknown",
+                        evidence_classification="documented",
                     )
                 )
+
+        event_ids = {
+            item.get("event_id")
+            for item in graph_context.get("events", [])
+            if isinstance(item, dict) and isinstance(item.get("event_id"), str)
+        }
+        valid_event_ids = {
+            row[0]
+            for row in db.query(ProductEvent.id)
+            .filter(
+                ProductEvent.company_id == proposal.company_id,
+                ProductEvent.id.in_(event_ids or {""}),
+            )
+            .all()
+        }
+        if valid_event_ids:
+            db.execute(
+                analysis_events.insert(),
+                [
+                    {"analysis_id": analysis.id, "event_id": event_id}
+                    for event_id in sorted(valid_event_ids)
+                ],
+            )
+
+        feedback_ids = {
+            item.get("feedback_id")
+            for item in relevant_customer_feedback
+            if isinstance(item, dict) and isinstance(item.get("feedback_id"), str)
+        }
+        valid_feedback_ids = {
+            row[0]
+            for row in db.query(Feedback.id)
+            .filter(
+                Feedback.company_id == proposal.company_id,
+                Feedback.id.in_(feedback_ids or {""}),
+            )
+            .all()
+        }
+        if valid_feedback_ids:
+            db.execute(
+                analysis_feedback.insert(),
+                [
+                    {"analysis_id": analysis.id, "feedback_id": feedback_id}
+                    for feedback_id in sorted(valid_feedback_ids)
+                ],
+            )
 
         db.commit()
 
@@ -950,9 +1341,22 @@ def analyze_proposal(
             "recommendation": analysis.recommendation,
             "risks": analysis.risks,
             "limitations": limitations,
-            "claims": analysis_result.get("claims", []),
+            "claims": analysis_snapshot.get("verified_claims", []),
+            "unverified_claims": analysis_snapshot.get("unverified_claims", []),
             "internal_evidence": internal_response,
             "external_evidence": external_response,
+            "evidence": (
+                analysis_snapshot.get("documentary_evidence", [])
+                if snapshot_storage_available
+                else internal_response + external_response
+            ),
+            "evidence_snapshot_available": snapshot_storage_available,
+            "context_retrieval_mode": (
+                "analysis_time_snapshot"
+                if snapshot_storage_available
+                else "snapshot_storage_migration_required"
+            ),
+            "analysis_snapshot": analysis_snapshot if snapshot_storage_available else None,
             "external_research": external_research,
             "customer_feedback_context": {
                 "feedback_count": len(relevant_customer_feedback),
@@ -970,7 +1374,6 @@ def analyze_proposal(
                 ),
             },
             "company_knowledge_context": graph_context,
-            "evidence": internal_response + external_response,
         }
 
     except (EmbeddingError, ProposalAnalysisError) as exc:
@@ -1038,6 +1441,86 @@ def get_proposal_analysis(
             detail="Proposal analysis not found",
         )
 
+    snapshot_row = None
+    if _snapshot_storage_available(db):
+        snapshot_row = db.get(ProposalAnalysisSnapshot, analysis.id)
+
+    saved_snapshot = (
+        snapshot_row.snapshot
+        if snapshot_row is not None and isinstance(snapshot_row.snapshot, dict)
+        else None
+    )
+    if saved_snapshot is not None:
+        if not _snapshot_is_public(saved_snapshot):
+            raise HTTPException(
+                status_code=404,
+                detail="Proposal analysis not found",
+            )
+        # The source may have become restricted after this analysis was saved.
+        for passage in saved_snapshot.get("documentary_evidence", []):
+            source_id = passage.get("source_id") if isinstance(passage, dict) else None
+            source = db.get(SourceDocument, source_id) if source_id else None
+            if source is not None and source.permission_status != "public":
+                raise HTTPException(
+                    status_code=404,
+                    detail="Proposal analysis not found",
+                )
+
+        saved_proposal = saved_snapshot.get("proposal") or {}
+        saved_graph = _json_safe(
+            saved_snapshot.get("company_knowledge_context") or {}
+        )
+        if isinstance(saved_graph, dict):
+            saved_graph["interpretation_warning"] = (
+                str(saved_graph.get("interpretation_warning") or "")
+                + " This is the graph context captured when this analysis completed; "
+                "it is not a current graph projection."
+            ).strip()
+
+        saved_evidence = saved_snapshot.get("documentary_evidence") or []
+        saved_claims = saved_snapshot.get("verified_claims") or []
+        saved_unverified_claims = saved_snapshot.get("unverified_claims") or []
+        return {
+            "analysis_id": analysis.id,
+            "status": analysis.status,
+            "created_at": analysis.created_at,
+            "completed_at": analysis.completed_at,
+            "proposal": {
+                "id": saved_proposal.get("id", proposal.id),
+                "company_id": saved_proposal.get("company_id", proposal.company_id),
+                "title": saved_proposal.get("title", proposal.title),
+                "description": saved_proposal.get("description", proposal.description),
+                "status": saved_proposal.get("status", proposal.status),
+            },
+            "recommendation": analysis.recommendation,
+            "risks": analysis.risks,
+            "limitations": analysis.limitations,
+            "claims": saved_claims,
+            "unverified_claims": saved_unverified_claims,
+            "evidence": saved_evidence,
+            "internal_evidence": [
+                item for item in saved_evidence
+                if item.get("evidence_scope") != "external"
+            ],
+            "external_evidence": [
+                item for item in saved_evidence
+                if item.get("evidence_scope") == "external"
+            ],
+            "company_knowledge_context": saved_graph,
+            "customer_feedback_context": saved_snapshot.get(
+                "customer_feedback_context", {}
+            ),
+            "external_research": saved_snapshot.get("external_research", {}),
+            "evidence_snapshot_available": True,
+            "snapshot_captured_at": saved_snapshot.get("captured_at"),
+            "snapshot_warning": (
+                "Retrieved passages and the public graph context are the "
+                "analysis-time snapshot. Customer feedback snapshots include "
+                "only completed records linked to public source documents."
+            ),
+            "context_retrieval_mode": "analysis_time_snapshot",
+        }
+
     claims_by_statement = {}
 
     for record, source, source_company in evidence_rows:
@@ -1049,7 +1532,8 @@ def get_proposal_analysis(
                 "type": "source_linked_claim",
                 "source_ids": [],
                 "sources": [],
-                "evidence_status": "cited_context",
+                "evidence_status": "citation_verification_not_preserved",
+                "verification_status": "not_preserved_for_legacy_analysis",
                 "evidence_classification": record.evidence_classification,
                 "evidence_scope": "unknown",
             }
@@ -1158,7 +1642,11 @@ def get_proposal_analysis(
         "risks": analysis.risks,
         "limitations": analysis.limitations,
         "claims": saved_claims,
+        "unverified_claims": [],
+        "evidence": [],
         "company_knowledge_context": company_knowledge_context,
         "customer_feedback_context": customer_feedback_context,
-        "context_retrieval_mode": "refreshed_current_public_company_data",
+        "evidence_snapshot_available": False,
+        "snapshot_warning": "Historical evidence snapshot unavailable.",
+        "context_retrieval_mode": "legacy_refreshed_current_public_data",
     }

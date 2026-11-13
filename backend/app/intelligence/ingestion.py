@@ -838,27 +838,67 @@ def process_company_sources(
 def get_company_ingestion_status(
     db: Session,
     company_id: str,
+    include_authorized_internal: bool = False,
 ) -> dict[str, Any]:
-    """Return document-processing and event counts for one company."""
+    """Return counts for evidence the caller is allowed to access."""
     company = db.get(Company, company_id)
 
     if company is None:
         raise ValueError(f"Company not found: {company_id}")
 
-    sources = (
-        db.query(SourceDocument)
-        .filter(SourceDocument.company_id == company_id)
-        .all()
+    visible_permissions = {"public"}
+    if include_authorized_internal:
+        visible_permissions.add("authorized_internal")
+
+    sources = db.query(SourceDocument).filter(
+        SourceDocument.company_id == company_id,
+        SourceDocument.permission_status.in_(visible_permissions),
+    ).all()
+    company_events = db.query(ProductEvent.id).filter(
+        ProductEvent.company_id == company_id
+    ).all()
+    event_ids = {row[0] for row in company_events}
+    event_source_rows = []
+    if event_ids:
+        event_source_rows = db.execute(
+            select(
+                event_sources.c.event_id,
+                event_sources.c.source_id,
+                SourceDocument.company_id,
+                SourceDocument.permission_status,
+            )
+            .join(
+                SourceDocument,
+                SourceDocument.id == event_sources.c.source_id,
+            )
+            .where(event_sources.c.event_id.in_(event_ids))
+        ).all()
+
+    sources_by_event: dict[str, list[tuple[str, str, str]]] = {}
+    for event_id, source_id, source_company_id, permission_status in event_source_rows:
+        sources_by_event.setdefault(event_id, []).append(
+            (source_id, source_company_id, permission_status)
+        )
+    events_count = sum(
+        1
+        for event_id in event_ids
+        if sources_by_event.get(event_id)
+        and all(
+            source_company_id == company_id
+            and permission_status in visible_permissions
+            for _, source_company_id, permission_status
+            in sources_by_event[event_id]
+        )
     )
 
-    events_count = (
-        db.query(ProductEvent)
-        .filter(ProductEvent.company_id == company_id)
-        .count()
-    )
     knowledge_items_count = (
-        db.query(KnowledgeItem)
-        .filter(KnowledgeItem.company_id == company_id)
+        db.query(KnowledgeItem.id)
+        .join(SourceDocument, SourceDocument.id == KnowledgeItem.source_id)
+        .filter(
+            KnowledgeItem.company_id == company_id,
+            SourceDocument.company_id == company_id,
+            SourceDocument.permission_status.in_(visible_permissions),
+        )
         .count()
     )
 
@@ -876,8 +916,7 @@ def get_company_ingestion_status(
         "total_knowledge_items": knowledge_items_count,
         "processing_status_counts": status_counts,
         "eligible_sources": sum(
-            1
-            for source in sources
+            1 for source in sources
             if source.permission_status in ALLOWED_PERMISSION_STATUSES
         ),
     }

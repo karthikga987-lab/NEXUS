@@ -47,8 +47,12 @@ def graph_to_dict(graph: nx.MultiDiGraph) -> dict[str, Any]:
     """
 
     nodes = []
+    node_counts: dict[str, int] = {}
+    relationship_counts: dict[str, int] = {}
 
     for node_id, attributes in graph.nodes(data=True):
+        node_type = attributes.get("node_type", "unknown")
+        node_counts[node_type] = node_counts.get(node_type, 0) + 1
         nodes.append(
             {
                 "id": str(node_id),
@@ -63,6 +67,10 @@ def graph_to_dict(graph: nx.MultiDiGraph) -> dict[str, Any]:
             keys=True,
             data=True,
         ):
+            relation_type = attributes.get("relation_type", "UNKNOWN")
+            relationship_counts[relation_type] = relationship_counts.get(
+                relation_type, 0
+            ) + 1
             edges.append(
                 {
                     "id": f"{source}->{target}:{key}",
@@ -74,6 +82,10 @@ def graph_to_dict(graph: nx.MultiDiGraph) -> dict[str, Any]:
             )
     else:
         for source, target, attributes in graph.edges(data=True):
+            relation_type = attributes.get("relation_type", "UNKNOWN")
+            relationship_counts[relation_type] = relationship_counts.get(
+                relation_type, 0
+            ) + 1
             edges.append(
                 {
                     "id": f"{source}->{target}",
@@ -90,6 +102,8 @@ def graph_to_dict(graph: nx.MultiDiGraph) -> dict[str, Any]:
         "summary": {
             "node_count": graph.number_of_nodes(),
             "edge_count": graph.number_of_edges(),
+            "node_counts": node_counts,
+            "relationship_counts": relationship_counts,
         },
         "nodes": nodes,
         "edges": edges,

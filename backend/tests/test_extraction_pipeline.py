@@ -73,6 +73,7 @@ def test_valid_model_json_extracts_event_with_source_provenance(monkeypatch):
     assert request_body["stream"] is False
     assert request_body["options"]["num_predict"] == 2048
     assert "Return exactly one JSON object" in request_body["messages"][1]["content"]
+    assert "include that completed partnership as an event" in request_body["messages"][1]["content"]
 
 
 def test_markdown_fenced_json_is_accepted(monkeypatch):
@@ -206,6 +207,143 @@ def test_product_description_does_not_become_a_launch():
         "synthetic-source-id",
         "synthetic-company-id",
     ) is None
+
+
+def test_explicit_product_partnership_is_retained_as_an_evidenced_event():
+    source = (
+        "Ceva and boAt today announced they have formed a strategic "
+        "partnership to develop technology for boAt earbuds."
+    )
+    event = {
+        "product_name": "boAt earbuds",
+        "event_type": "partnership",
+        "title": "Ceva and boAt form a product technology partnership",
+        "description": "The companies formed a partnership concerning boAt earbuds.",
+        "event_date": None,
+        "stated_reason": None,
+        "outcome_summary": None,
+        "extraction_confidence": 0.9,
+        "evidence_quote": source,
+        "field_quotes": {
+            "product_name": "boAt earbuds",
+            "event_date": None,
+            "stated_reason": None,
+            "outcome_summary": None,
+        },
+    }
+
+    validated = extraction.validate_extracted_event(
+        event,
+        source,
+        "synthetic-source-id",
+        "synthetic-company-id",
+    )
+
+    assert validated is not None
+    assert validated["event_type"] == "partnership"
+    assert validated["evidence_quote"] == source
+    assert validated["event_date"] is None
+
+
+def test_whitespace_normalized_model_quote_is_restored_to_verbatim_source():
+    source = (
+        "Acme launched Acme Pay on March 3, 2024.\n\n"
+        "Customers can now use Acme Pay for checkout."
+    )
+    event = {
+        **EVENT,
+        "title": "Acme Pay launched",
+        "evidence_quote": (
+            "Acme launched Acme Pay on March 3, 2024. "
+            "Customers can now use Acme Pay for checkout."
+        ),
+        "field_quotes": {
+            "product_name": "Acme Pay",
+            "event_date": "March 3, 2024",
+        },
+    }
+
+    validated = extraction.validate_extracted_event(
+        event,
+        source,
+        "synthetic-source-id",
+        "synthetic-company-id",
+    )
+
+    assert validated is not None
+    assert validated["evidence_quote"] == source
+    assert validated["evidence_quote"] in source
+    assert validated["event_date"] == "2024-03-03"
+
+
+def test_duplicate_model_events_with_same_source_evidence_are_deduplicated(
+    monkeypatch,
+):
+    duplicate = {**EVENT, "title": "Acme Pay debut"}
+    _mock_ollama(
+        monkeypatch,
+        [json.dumps({"events": [EVENT, duplicate]})],
+    )
+
+    events = extraction.extract_events(
+        SOURCE,
+        "synthetic-source-id",
+        "synthetic-company-id",
+    )
+
+    assert len(events) == 1
+    assert events[0]["title"] == EVENT["title"]
+
+
+def test_duplicate_event_quote_is_not_persisted_as_knowledge_item(monkeypatch):
+    source = (
+        "Ceva and boAt today announced they have formed a strategic "
+        "partnership to develop technology for boAt earbuds."
+    )
+    event = {
+        "product_name": "boAt earbuds",
+        "event_type": "partnership",
+        "title": "Ceva and boAt form a product technology partnership",
+        "description": None,
+        "event_date": None,
+        "stated_reason": None,
+        "outcome_summary": None,
+        "extraction_confidence": 0.9,
+        "evidence_quote": source,
+        "field_quotes": {
+            "product_name": "boAt earbuds",
+            "event_date": None,
+            "stated_reason": None,
+            "outcome_summary": None,
+        },
+    }
+    knowledge_item = {
+        "item_type": "decision",
+        "title": "Strategic Partnership Between Ceva and boAt",
+        "description": "Ceva and boAt formed a strategic partnership.",
+        "subject_name": None,
+        "actor": "Ceva and boAt",
+        "status": "unknown",
+        "item_date": None,
+        "item_date_quote": None,
+        "evidence_quote": source,
+        "evidence_classification": "documented",
+        "extraction_confidence": 0.9,
+    }
+    _mock_ollama(
+        monkeypatch,
+        [json.dumps({"events": [event], "knowledge_items": [knowledge_item]})],
+    )
+
+    result = extraction.extract_events(
+        source,
+        "synthetic-source-id",
+        "synthetic-company-id",
+    )
+
+    assert len(result) == 1
+    assert result[0]["event_type"] == "partnership"
+    assert result.knowledge_items == []
 
 
 def test_explicit_simplification_rationale_is_retained():

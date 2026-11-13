@@ -684,6 +684,17 @@
   margin: 0;
 }
 
+.proposal-verification-warning {
+  padding: 10px 12px;
+  margin: 0;
+  border: 1px solid rgba(245, 180, 90, 0.42);
+  border-radius: 8px;
+  background: rgba(130, 78, 16, 0.16);
+  color: #f3d39f;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 .proposal-form {
   display: flex;
   flex-direction: column;
@@ -1007,6 +1018,106 @@
   font-size: 9px;
   text-align: center;
   margin: 16px 0 0;
+}
+
+.proposal-workflow-progress,
+.proposal-refresh-warning {
+  margin-top: 18px;
+  padding: 18px 20px;
+  border: 1px solid rgba(164, 139, 210, 0.3);
+  border-radius: 14px;
+  background: rgba(30, 24, 43, 0.82);
+  color: #f2eef8;
+}
+
+.proposal-workflow-progress h3 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 14px;
+  font-size: 15px;
+}
+
+.proposal-workflow-progress ol {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workflow-stage {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  color: #d4ccdf;
+  font-size: 13px;
+}
+
+.workflow-stage strong {
+  color: #b9afc8;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.workflow-stage small {
+  grid-column: 2 / -1;
+  color: #b9afc8;
+  font-size: 11px;
+}
+
+.workflow-stage-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #777080;
+}
+
+.workflow-stage.running .workflow-stage-indicator {
+  background: #b89bfa;
+  box-shadow: 0 0 0 4px rgba(184, 155, 250, 0.13);
+}
+
+.workflow-stage.completed .workflow-stage-indicator {
+  background: #55c89a;
+}
+
+.workflow-stage.partial .workflow-stage-indicator {
+  background: #efb45d;
+}
+
+.workflow-stage.failed .workflow-stage-indicator {
+  background: #f17d86;
+}
+
+.workflow-stage.skipped .workflow-stage-indicator {
+  background: #96909f;
+}
+
+.proposal-workflow-progress > p,
+.proposal-refresh-warning p {
+  margin: 13px 0 0;
+  color: #c7bfce;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.proposal-refresh-warning {
+  border-color: rgba(229, 170, 78, 0.45);
+  background: rgba(58, 44, 22, 0.72);
+}
+
+.proposal-refresh-warning strong {
+  color: #ffe0a9;
+}
+
+.proposal-refresh-warning ul {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  color: #f2d6a6;
+  font-size: 12px;
 }
 
 /* RESPONSIVE */

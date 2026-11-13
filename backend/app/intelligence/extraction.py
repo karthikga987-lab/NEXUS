@@ -385,6 +385,11 @@ EVENT CLASSIFICATION:
     or material change may qualify even when no event date is given.
 29. If the source does not establish an actual completed change,
     return no event.
+29a. partnership: extract an explicitly formed or announced partnership
+     when the source ties it to the company's products, product
+     development, technology, or distribution. The completed partnership
+     itself is the event; future products mentioned in the same source
+     are not completed launches or outcomes.
 
 DATE RULES:
 30. event_date must be an explicitly stated event date.
@@ -573,6 +578,13 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
                     "Return exactly one JSON object with events and "
                     "knowledge_items arrays. Use an empty array for either "
                     "category when no qualifying records are documented. "
+                    "If the source explicitly states a company has formed "
+                    "or entered into a product-related partnership or "
+                    "collaboration, include that completed partnership as "
+                    "an event with event_type partnership; do not place it "
+                    "only in knowledge_items. Do not turn future product "
+                    "work mentioned in the partnership into a launch or "
+                    "outcome. "
                     "If neither category is supported, return "
                     "{\"events\": [], \"knowledge_items\": []}.\n\n"
                     "<SOURCE>\n"
@@ -711,14 +723,56 @@ def _ask_ollama(source_text: str) -> dict[str, Any]:
 
     raise ExtractionError(f"Event extraction failed after retry: {last_error}")
 
-def _is_exact_quote(quote: Any, source_text: str) -> bool:
-    """Return True only when the exact quotation occurs in the source."""
+def _source_quote_substring(quote: Any, source_text: str) -> str | None:
+    """Map a whitespace-normalized model quote back to source characters.
 
-    return (
-        isinstance(quote, str)
-        and bool(quote.strip())
-        and quote in source_text
-    )
+    Models often flatten line breaks when copying a quotation. Match only
+    exact non-whitespace characters and return the corresponding original
+    source slice so persisted provenance remains a verbatim excerpt.
+    """
+    if not isinstance(quote, str) or not quote.strip():
+        return None
+    if not isinstance(source_text, str) or not source_text:
+        return None
+    if quote in source_text:
+        return quote
+
+    normalized_quote = " ".join(quote.split())
+    normalized_chars: list[str] = []
+    original_indices: list[int] = []
+    pending_space = False
+
+    for index, character in enumerate(source_text):
+        if character.isspace():
+            if normalized_chars and not pending_space:
+                normalized_chars.append(" ")
+                original_indices.append(index)
+            pending_space = True
+            continue
+        normalized_chars.append(character)
+        original_indices.append(index)
+        pending_space = False
+
+    if normalized_chars and normalized_chars[-1] == " ":
+        normalized_chars.pop()
+        original_indices.pop()
+
+    normalized_source = "".join(normalized_chars)
+    offset = normalized_source.find(normalized_quote)
+    if offset < 0:
+        return None
+
+    original_start = original_indices[offset]
+    original_end = original_indices[offset + len(normalized_quote) - 1] + 1
+    recovered = source_text[original_start:original_end]
+    if " ".join(recovered.split()) != normalized_quote:
+        return None
+    return recovered
+
+
+def _is_exact_quote(quote: Any, source_text: str) -> bool:
+    """Return True only when wording matches an exact source excerpt."""
+    return _source_quote_substring(quote, source_text) is not None
 
 
 def _meaningful_words(value: str) -> set[str]:
@@ -739,6 +793,11 @@ def _meaningful_words(value: str) -> set[str]:
         for word in words
         if len(word) > 2 and word not in stop_words
     }
+
+
+def _normalize_event_text(value: Any) -> str:
+    """Normalize whitespace and case for exact event deduplication keys."""
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
 
 
 def _is_supported_by_quote(
@@ -922,7 +981,8 @@ def _completed_event_quote_fragment(
     the sentence containing the completed-event evidence.
     """
 
-    if not _is_exact_quote(quote, source_text):
+    quote = _source_quote_substring(quote, source_text)
+    if quote is None:
         return None
 
     normalized = quote.lower()
@@ -999,6 +1059,12 @@ def _completed_event_quote_fragment(
         "ran an experiment",
         "approved",
         "decided to",
+        "formed a partnership",
+        "formed partnership",
+        "formed a strategic partnership",
+        "formed strategic partnership",
+        "entered into a partnership",
+        "entered into partnership",
         "ended support",
         "cancelled",
         "canceled",
@@ -1068,10 +1134,9 @@ def _completed_event_quote_fragment(
     else:
         return None
 
-    if not candidate or not _is_exact_quote(candidate, source_text):
+    if not candidate:
         return None
-
-    return candidate
+    return _source_quote_substring(candidate, source_text)
 
 
 def _is_completed_event_quote(
@@ -1397,7 +1462,7 @@ def validate_extracted_knowledge_item(
     item_type = item.get("item_type")
     title = item.get("title")
     description = item.get("description")
-    quote = item.get("evidence_quote")
+    quote = _source_quote_substring(item.get("evidence_quote"), source_text)
 
     if (
         item_type not in KNOWLEDGE_ITEM_TYPES
@@ -1499,6 +1564,15 @@ class DocumentExtraction(list):
         self.knowledge_items = knowledge_items
 
 
+def _same_evidence_excerpt(left: Any, right: Any) -> bool:
+    """Match long identical/contained quotations across extraction categories."""
+    left_text = " ".join(str(left or "").casefold().split())
+    right_text = " ".join(str(right or "").casefold().split())
+    return min(len(left_text), len(right_text)) >= 60 and (
+        left_text in right_text or right_text in left_text
+    )
+
+
 def extract_events(
     source_text: str,
     source_id: str,
@@ -1525,6 +1599,7 @@ def extract_events(
         )
 
     validated_events = []
+    seen_event_evidence: set[tuple[str, str, str]] = set()
 
     for event in raw_events:
         validated = validate_extracted_event(
@@ -1535,6 +1610,14 @@ def extract_events(
         )
 
         if validated is not None:
+            evidence_key = (
+                _normalize_event_text(validated.get("product_name")),
+                str(validated.get("event_type") or "").casefold(),
+                _normalize_event_text(validated.get("evidence_quote")),
+            )
+            if evidence_key in seen_event_evidence:
+                continue
+            seen_event_evidence.add(evidence_key)
             validated_events.append(validated)
 
     raw_knowledge_items = result.get("knowledge_items", [])
@@ -1553,6 +1636,22 @@ def extract_events(
         )
         if validated is not None:
             validated_knowledge_items.append(validated)
+
+    event_quotes = [
+        event.get("evidence_quote")
+        for event in validated_events
+    ]
+    validated_knowledge_items = [
+        item
+        for item in validated_knowledge_items
+        if not any(
+            _same_evidence_excerpt(
+                event_quote,
+                item.get("evidence_quote"),
+            )
+            for event_quote in event_quotes
+        )
+    ]
 
     return DocumentExtraction(
         validated_events,

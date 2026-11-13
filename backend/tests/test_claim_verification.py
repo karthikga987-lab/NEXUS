@@ -209,3 +209,108 @@ def test_claim_with_no_source_passage_is_not_verified():
 
     assert validated == {}
     assert error is None
+
+
+def test_competitive_price_claim_rejects_quote_that_only_states_launch_price(
+    monkeypatch,
+):
+    statement = (
+        "The Airdopes ProClip is available for purchase at a competitive price point."
+    )
+    source_passage = (
+        "boAt has launched the Airdopes ProClip open-ear earbuds in India at Rs. 1,599."
+    )
+
+    def fake_ollama_batch(items):
+        return [{
+            "request_id": items[0]["request_id"],
+            "claim_index": items[0]["claim_index"],
+            "source_id": items[0]["source_id"],
+            "supported": True,
+            "supporting_quote": source_passage,
+        }], None
+
+    monkeypatch.setattr(
+        claim_verification, "_call_ollama_batch", fake_ollama_batch
+    )
+    validated, error = claim_verification.verify_claim_citations(
+        claims=[make_claim(statement)],
+        source_text_by_id={"source-1": source_passage},
+    )
+
+    assert validated == {}
+    assert error is not None
+    failures = claim_verification.claim_quote_support_failures(
+        statement, source_passage, source_passage
+    )
+    assert "comparative_price_claim_without_quote_benchmark" in failures
+    assert "availability_claim_without_quote_support" in failures
+
+
+def test_competitive_price_claim_accepts_explicit_source_benchmark(monkeypatch):
+    statement = (
+        "The Airdopes ProClip is competitively priced below the segment's usual entry point."
+    )
+    quote = (
+        "At Rs. 1,599, it drops open-ear audio well below the segment's usual entry point."
+    )
+
+    def fake_ollama_batch(items):
+        return [{
+            "request_id": items[0]["request_id"],
+            "claim_index": items[0]["claim_index"],
+            "source_id": items[0]["source_id"],
+            "supported": True,
+            "supporting_quote": quote,
+        }], None
+
+    monkeypatch.setattr(
+        claim_verification, "_call_ollama_batch", fake_ollama_batch
+    )
+    validated, error = claim_verification.verify_claim_citations(
+        claims=[make_claim(statement)],
+        source_text_by_id={"source-1": quote},
+    )
+
+    assert error is None
+    assert validated[(0, "source-1")]["supporting_quote"] == quote
+
+
+def test_broader_source_passage_cannot_replace_quote_only_support(monkeypatch):
+    statement = "The product is designed for professional cyclists."
+    broad_passage = (
+        "The manufacturer markets the product to commuters. "
+        "Professional cyclists are mentioned as a general audience in the article."
+    )
+    stages = []
+
+    def fake_ollama_batch(items):
+        stages.append(items[0]["verification_stage"])
+        if items[0]["verification_stage"] == "source_passage":
+            return [{
+                "request_id": items[0]["request_id"],
+                "claim_index": items[0]["claim_index"],
+                "source_id": items[0]["source_id"],
+                "supported": True,
+                "supporting_quote": broad_passage,
+            }], None
+        assert items[0]["source_text"] == broad_passage
+        return [{
+            "request_id": items[0]["request_id"],
+            "claim_index": items[0]["claim_index"],
+            "source_id": items[0]["source_id"],
+            "supported": False,
+            "supporting_quote": "",
+        }], None
+
+    monkeypatch.setattr(
+        claim_verification, "_call_ollama_batch", fake_ollama_batch
+    )
+    validated, error = claim_verification.verify_claim_citations(
+        claims=[make_claim(statement)],
+        source_text_by_id={"source-1": broad_passage},
+    )
+
+    assert validated == {}
+    assert error is not None
+    assert stages == ["source_passage", "saved_claim_excerpt"]

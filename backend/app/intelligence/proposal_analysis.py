@@ -1428,6 +1428,22 @@ def _validate_model_result(
             if claim_type == "factual_observation":
                 claim_type = "hypothesis"
 
+        supporting_evidence = []
+        if verification_status == "verified" and verified_citations is not None:
+            for source_id in valid_ids:
+                citation = verified_citations.get((claim_index, source_id))
+                if not isinstance(citation, dict):
+                    continue
+                quote = citation.get("supporting_quote")
+                if isinstance(quote, str) and quote.strip():
+                    supporting_evidence.append({
+                        "source_id": source_id,
+                        "supporting_quote": quote,
+                        "verification_method": citation.get(
+                            "verification_method"
+                        ),
+                    })
+
         validated_claims.append({
             "statement": statement.strip(),
             "type": claim_type,
@@ -1436,6 +1452,7 @@ def _validate_model_result(
             "verification_status": verification_status,
             "evidence_scope": evidence_scope,
             "source_provenance": provenance,
+            "supporting_evidence": supporting_evidence,
         })
 
     if normalized_claim_count:

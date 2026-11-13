@@ -9,7 +9,7 @@ import pytest
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 CURRENT_OLD_HEAD = "c8d2f7a1946b"
-NEW_HEAD = "d4e6c8a109bf"
+NEW_HEAD = "a83f4d129c71"
 
 
 def run_migration(database_path, revision="head", command="upgrade"):
@@ -162,7 +162,7 @@ def test_downgrade_refuses_to_discard_knowledge_rows(tmp_path):
         ).fetchone() == ("The synthetic team approved a pilot.",)
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == (NEW_HEAD,)
+        ).fetchone() == ("d4e6c8a109bf",)
 
 
 def test_empty_additive_migration_can_be_downgraded_safely(tmp_path):

@@ -107,3 +107,68 @@ def test_competitor_excerpt_cannot_cite_unsupported_milton_feature(monkeypatch):
     assert claim["type"] == "hypothesis"
     assert result["evidence_sources"][0]["source_id"] == source_id
     assert result["evidence_sources"][0]["source_url"] == source_url
+
+
+def test_only_independently_verified_claims_retain_exact_supporting_quotes():
+    source_id = "synthetic-source-for-snapshot"
+    provenance = {
+        source_id: {
+            "evidence_scope": "public_company",
+            "source_title": "Synthetic test source",
+        }
+    }
+    result = _validate_model_result(
+        {
+            "recommendation": "Validate the synthetic assumption.",
+            "risks": [],
+            "limitations": [],
+            "claims": [{
+                "statement": "The synthetic company introduced a feature.",
+                "type": "factual_observation",
+                "source_ids": [source_id],
+            }],
+        },
+        {source_id},
+        provenance,
+        verified_citations={(0, source_id): {
+            "supporting_quote": "The synthetic company introduced a feature.",
+            "verification_method": "llm_with_exact_quote_validation",
+            "passage_index": 0,
+        }},
+        evidence_chunks=[{
+            "source_id": source_id,
+            "chunk_text": "The synthetic company introduced a feature.",
+            "evidence_scope": "public_company",
+        }],
+    )
+    assert result["claims"][0]["verification_status"] == "verified"
+    assert result["claims"][0]["supporting_evidence"] == [{
+        "source_id": source_id,
+        "supporting_quote": "The synthetic company introduced a feature.",
+        "verification_method": "llm_with_exact_quote_validation",
+    }]
+
+    unavailable = _validate_model_result(
+        {
+            "recommendation": "Validate the synthetic assumption.",
+            "risks": [],
+            "limitations": [],
+            "claims": [{
+                "statement": "The synthetic company introduced a feature.",
+                "type": "factual_observation",
+                "source_ids": [source_id],
+            }],
+        },
+        {source_id},
+        provenance,
+        verified_citations={},
+        verification_error="[SYNTHETIC] verifier unavailable",
+        evidence_chunks=[{
+            "source_id": source_id,
+            "chunk_text": "The synthetic company introduced a feature.",
+            "evidence_scope": "public_company",
+        }],
+    )
+    assert unavailable["claims"][0]["verification_status"] == "unverified"
+    assert unavailable["claims"][0]["source_ids"] == []
+    assert unavailable["claims"][0]["supporting_evidence"] == []
