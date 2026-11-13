@@ -1,112 +1,89 @@
-# NEXUS – Shared Starter Repository
+# NEXUS — Product Knowledge and Decision Intelligence
 
-A common starting point for all four team members. This is a **working scaffold**, not the finished intelligence engine. It gives the team one repository, a shared database model, common API contracts, frontend shell, and clear module ownership.
+NEXUS is a shared four-member project that collects eligible public sources, preserves source provenance, extracts evidence-linked product knowledge, and supports company-scoped feedback, search, RAG, knowledge-graph, and proposal-analysis workflows.
 
-## Architecture
+The integration branch is `integration/team-integration`. See [the team integration and setup guide](docs/TEAM_INTEGRATION_AND_SETUP.md) for the branch rationale, feature map, safe database setup, local startup commands, known limitations, and team workflow.
 
-- `frontend/` – Member 1: React + Vite UI
-- `backend/` – shared FastAPI application and database contracts
-  - `research/` – Member 2
-  - `intelligence/` and `knowledge_graph/` – Member 3
-  - `feedback/` – Member 4
-- `docs/` – shared API and data contracts
-- `sample_data/` – clearly labelled demo fixtures only
+## Current application
 
-## 1. Prerequisites
+- `frontend/` — React and Vite company workspaces, research/source views, product timeline, knowledge graph, customer intelligence, proposal analysis, and AI Assistant.
+- `backend/` — FastAPI, SQLAlchemy, canonical Alembic history, public research, local authorized text-source import, Qwen/Ollama extraction and reasoning, evidence verification, nomic embeddings, RAG, feedback analysis, and proposal persistence.
+- `docs/DATA_CONTRACT_v1.md` — shared v1 contract plus its explicitly additive extension. Existing shared fields and enum values remain unchanged.
 
-- Python 3.11+
-- Node.js 20+
-- Git
-- PostgreSQL (optional initially; SQLite works for local scaffolding)
+## Quick start — Windows PowerShell
 
-## 2. Run backend (Windows PowerShell)
+Prerequisites: Python 3.11 or later, Node.js 20 or later, Git, and Ollama for model-backed extraction, embeddings, RAG, and proposal analysis.
+
+### Backend
+
+From the repository root:
 
 ```powershell
-cd backend
+Set-Location backend
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -r requirements.txt
-Copy-Item .env.example .env
-uvicorn app.main:app --reload
+python -m pip install -r requirements.txt
+if (-not (Test-Path .env)) { Copy-Item ..\.env.example .env }
 ```
 
-Open `http://127.0.0.1:8000/docs`.
-
-The starter uses SQLite by default, so the team can begin without setting up PostgreSQL. For shared integration, create a PostgreSQL database and set `DATABASE_URL` in `backend/.env`, for example:
-
-```env
-DATABASE_URL=postgresql+psycopg://postgres:YOUR_PASSWORD@localhost:5432/nexus
-```
-
-Then install `psycopg[binary]` (already included in requirements).
-
-## 3. Run frontend
-
-Open a second terminal:
+For a new local clone, inspect that `backend/nexus.db` does not already contain data, then initialize the SQLite database from the canonical migration history and start the API:
 
 ```powershell
-cd frontend
-npm install
-Copy-Item .env.example .env
-npm run dev
+python -m alembic upgrade head
+python -m uvicorn app.main:app --reload --env-file .env
 ```
 
-Open the Vite URL shown in the terminal. The frontend expects the API at `http://127.0.0.1:8000`.
+API health is at `http://127.0.0.1:8000/health`; interactive API documentation is at `http://127.0.0.1:8000/docs`.
 
-## 4. Git collaboration
+If a database file already exists, do not treat it as a fresh database. Back it up and test the intended migration on a temporary copy before upgrading it. NEXUS does not share a database merely because the source branch is shared.
 
-One person creates the GitHub repository and pushes this starter as `main`.
+### Ollama
 
-Each member then runs:
+Install and start Ollama, then download the configured models in a separate terminal:
 
-```bash
-git clone <YOUR_GITHUB_REPOSITORY_URL>
-cd NEXUS
-git checkout -b feature/frontend
+```powershell
+ollama pull qwen3:8b
+ollama pull nomic-embed-text
 ```
 
-Use the matching branch:
-- Member 1: `feature/frontend`
-- Member 2: `feature/data-collection`
-- Member 3: `feature/ai-intelligence`
-- Member 4: `feature/customer-intelligence`
+The defaults use `http://localhost:11434`. Research discovery uses bounded DDGS public search and does not require an API key. External sites may deny access or limit requests; NEXUS respects those restrictions.
 
-Before starting a task, pull the latest `main`. Commit and push only your branch. Open a pull request to merge into `main`. Do not independently rename shared fields or change common models without discussing it first.
+### Frontend
 
-## 5. Shared rules
+In a second terminal from the repository root:
 
-1. `company_id`, `source_id`, `event_id`, `proposal_id` and `feedback_id` are UUID strings.
-2. Dates are ISO 8601 timestamps. Store UTC timestamps; display local time in the UI.
-3. Every extracted factual claim/event must retain source references.
-4. Do not treat sequence or correlation as proof of causation.
-5. Use `evidence_classification`: `documented_cause`, `supported_relationship`, `correlation`, or `unknown`.
-6. Do not invent missing dates, reasons, metrics, decisions, or outcomes.
-7. Public data is not private internal company data. Internal integrations require company authorization.
-8. Keep demo fixtures explicitly labelled as demo data.
+```powershell
+Set-Location frontend
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+npm ci
+npm.cmd run dev
+```
 
-## 6. First integration milestones
+Open the Vite URL, normally `http://localhost:5173`. The frontend API URL is configured by `frontend/.env` using `VITE_API_BASE_URL`.
 
-- Member 2 + Member 3: agree on source-document and product-event extraction fields before changing models.
-- Member 1: build UI using the API and mock fixtures; don't wait for AI integration.
-- Member 4: use the shared `Feedback` model and feedback endpoints.
-- All: run the backend and frontend locally before merging.
+## Checks
 
-## 7. API overview
+Run the backend regression suite from the repository root:
 
-- `GET /health`
-- `POST /api/companies`
-- `GET /api/companies`
-- `GET /api/companies/{company_id}`
-- `POST /api/companies/{company_id}/research` – placeholder job response; Member 2 implements the research pipeline
-- `GET /api/companies/{company_id}/sources`
-- `GET /api/companies/{company_id}/events`
-- `POST /api/proposals/analyze` – placeholder analysis response; Member 3 implements evidence-grounded analysis
-- `POST /api/feedback`
-- `GET /api/feedback/analysis/{company_id}`
+```powershell
+python -m pytest backend/tests -q
+```
 
-See `docs/API_CONTRACT.md` for payload examples.
+Run frontend unit tests and the production build from `frontend/`:
 
-## Important
+```powershell
+node --test tests/*.test.js
+npm.cmd run build
+```
 
-The scaffold does not yet crawl websites, call Ollama, calculate sentiment, or produce validated recommendations. Those are the feature modules the team will implement. The placeholder endpoints must not be presented as completed AI functionality.
+`npm.cmd` avoids PowerShell's `npm.ps1` execution-policy restriction. The current frontend package has no dedicated lint or type-check script.
+
+## Data and security notes
+
+- One canonical Alembic history lives in `backend/migrations/versions`; do not copy the separate historical `backend/alembic/versions` chain from Member 2's branch.
+- Internal-source import supports local `.txt` and `.md` files. It is disabled by default; `NEXUS_ENABLE_LOCAL_INTERNAL_SOURCES=1` is for trusted loopback development only. The project has no general API authentication/authorization and must not be exposed as a production service.
+- Feedback can be submitted through the API and imported through the backend CSV endpoint. Sentiment and topic labels are heuristic; public customer-review discovery is not implemented.
+- Search snippets are discovery leads, not collected full documents and are not ingested as documentary evidence.
+- Proposals and AI analysis are separate from historical product events. Recommendations remain limited by the persisted evidence.
+- A public Git branch shares code, not a running backend, Ollama service, database, credentials, or uploaded documents.

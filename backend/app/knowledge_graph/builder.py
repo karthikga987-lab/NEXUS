@@ -1,0 +1,589 @@
+
+from __future__ import annotations
+
+from typing import Any
+
+import networkx as nx
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.research.status import effective_research_status
+from app.models.entities import (
+    AnalysisEvidence,
+    Company,
+    EventRelationship,
+    Proposal,
+    ProposalAnalysis,
+    ProductEvent,
+    ResearchRun,
+    SourceDocument,
+    analysis_events,
+    event_sources,
+    relationship_sources,
+)
+
+
+def _safe_value(value: Any) -> Any:
+    """Convert dates and enum values into graph-friendly values."""
+
+    if value is None:
+        return None
+
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+
+    if hasattr(value, "value"):
+        return value.value
+
+    return value
+
+
+def build_company_graph(
+    db: Session,
+    company_id: str,
+) -> nx.MultiDiGraph:
+    """
+    Build an evidence-aware knowledge graph for one company.
+
+    Only persisted database relationships are represented.
+    Relationship provenance is loaded from relationship_sources.
+    Chronological order is never used to infer causation.
+    """
+
+    graph = nx.MultiDiGraph()
+
+    company = db.get(Company, company_id)
+
+    if company is None:
+        raise ValueError(f"Company not found: {company_id}")
+
+    latest_run_status = None
+    if company.research_status in {"pending", "not_started"}:
+        latest_run_status = (
+            db.query(ResearchRun.status)
+            .filter(ResearchRun.company_id == company_id)
+            .order_by(ResearchRun.started_at.desc())
+            .first()
+        )
+        latest_run_status = latest_run_status[0] if latest_run_status else None
+
+    company_node = f"company:{company.id}"
+
+    graph.add_node(
+        company_node,
+        node_type="company",
+        company_id=company.id,
+        name=company.name,
+        website=company.website,
+        industry=company.industry,
+        description=company.description,
+        research_status=_safe_value(
+            effective_research_status(
+                company.research_status,
+                latest_run_status,
+            )
+        ),
+    )
+
+    sources = (
+        db.query(SourceDocument)
+        .filter(
+            SourceDocument.company_id == company_id,
+            SourceDocument.permission_status == "public",
+        )
+        .all()
+    )
+
+    event_source_rows = db.execute(
+        select(
+            event_sources.c.event_id,
+            event_sources.c.source_id,
+        )
+        .join(
+            SourceDocument,
+            SourceDocument.id == event_sources.c.source_id,
+        )
+        .where(
+            SourceDocument.company_id == company_id,
+        )
+    ).all()
+    source_ids_by_event: dict[str, set[str]] = {}
+    for row in event_source_rows:
+        source_ids_by_event.setdefault(row.event_id, set()).add(row.source_id)
+
+    public_source_ids = {source.id for source in sources}
+    eligible_event_ids = {
+        event_id
+        for event_id, event_source_ids in source_ids_by_event.items()
+        if event_source_ids and event_source_ids.issubset(public_source_ids)
+    }
+    events = (
+        db.query(ProductEvent)
+        .filter(
+            ProductEvent.company_id == company_id,
+            ProductEvent.id.in_(eligible_event_ids),
+        )
+        .all()
+    )
+
+    event_by_id = {
+        event.id: event
+        for event in events
+    }
+
+    source_by_id = {
+        source.id: source
+        for source in sources
+    }
+
+    # Source document nodes
+    for source in sources:
+        graph.add_node(
+            f"source:{source.id}",
+            node_type="source",
+            source_id=source.id,
+            company_id=source.company_id,
+            title=source.title,
+            url=source.url,
+            publisher=source.publisher,
+            source_type=_safe_value(source.source_type),
+            publication_date=_safe_value(source.publication_date),
+            collected_at=_safe_value(source.collected_at),
+            permission_status=_safe_value(source.permission_status),
+            reliability=source.reliability,
+            processing_status=_safe_value(source.processing_status),
+        )
+
+    # Product event nodes and company membership edges
+    for event in events:
+        event_node = f"event:{event.id}"
+
+        graph.add_node(
+            event_node,
+            node_type="event",
+            event_id=event.id,
+            company_id=event.company_id,
+            product_name=event.product_name,
+            event_type=_safe_value(event.event_type),
+            title=event.title,
+            description=event.description,
+            event_date=_safe_value(event.event_date),
+            stated_reason=event.stated_reason,
+            reported_outcome=event.reported_outcome,
+            evidence_classification=_safe_value(
+                event.evidence_classification
+            ),
+            extraction_confidence=event.extraction_confidence,
+            created_at=_safe_value(event.created_at),
+            updated_at=_safe_value(event.updated_at),
+        )
+
+        graph.add_edge(
+            company_node,
+            event_node,
+            relation_type="HAS_EVENT",
+            provenance_status="company_event_membership",
+        )
+
+    # Explicit event-to-source associations
+    if event_by_id:
+        event_source_rows = db.execute(
+            select(
+                event_sources.c.event_id,
+                event_sources.c.source_id,
+            ).where(
+                event_sources.c.event_id.in_(
+                    list(event_by_id.keys())
+                )
+            )
+        ).all()
+
+        for row in event_source_rows:
+            event_id = row.event_id
+            source_id = row.source_id
+
+            if event_id not in event_by_id:
+                continue
+
+            if source_id not in source_by_id:
+                continue
+
+            graph.add_edge(
+                f"event:{event_id}",
+                f"source:{source_id}",
+                relation_type="SUPPORTED_BY",
+                provenance_status="explicit_event_source_link",
+            )
+
+    # Persisted event-to-event relationships
+    relationship_source_rows = db.execute(
+        select(
+            relationship_sources.c.relationship_id,
+            relationship_sources.c.source_id,
+        )
+        .join(
+            SourceDocument,
+            SourceDocument.id == relationship_sources.c.source_id,
+        )
+        .where(
+            SourceDocument.company_id == company_id,
+        )
+    ).all()
+    source_ids_by_relationship: dict[str, set[str]] = {}
+    for row in relationship_source_rows:
+        source_ids_by_relationship.setdefault(
+            row.relationship_id, set()
+        ).add(row.source_id)
+    eligible_relationship_ids = {
+        relationship_id
+        for relationship_id, relationship_source_ids
+        in source_ids_by_relationship.items()
+        if relationship_source_ids
+        and relationship_source_ids.issubset(public_source_ids)
+    }
+    relationships = (
+        db.query(EventRelationship)
+        .filter(
+            EventRelationship.company_id == company_id,
+            EventRelationship.id.in_(eligible_relationship_ids),
+        )
+        .all()
+    )
+
+    relationship_ids = [
+        relationship.id
+        for relationship in relationships
+    ]
+
+    # Load relationship provenance in one query.
+    provenance_by_relationship: dict[str, list[dict[str, Any]]] = {}
+
+    if relationship_ids:
+        provenance_rows = db.execute(
+            select(
+                relationship_sources.c.relationship_id,
+                relationship_sources.c.source_id,
+                relationship_sources.c.supporting_quote,
+                relationship_sources.c.verification_method,
+                relationship_sources.c.created_at,
+            ).where(
+                relationship_sources.c.relationship_id.in_(
+                    relationship_ids
+                )
+            )
+        ).all()
+
+        for row in provenance_rows:
+            source = source_by_id.get(row.source_id)
+
+            # Only expose sources belonging to this company's
+            # already-loaded source collection.
+            if source is None:
+                continue
+
+            provenance_by_relationship.setdefault(
+                row.relationship_id,
+                [],
+            ).append(
+                {
+                    "source_id": source.id,
+                    "source_title": source.title,
+                    "source_url": source.url,
+                    "publisher": source.publisher,
+                    "publication_date": _safe_value(
+                        source.publication_date
+                    ),
+                    "supporting_quote": row.supporting_quote,
+                    "verification_method": row.verification_method,
+                    "provenance_created_at": _safe_value(
+                        row.created_at
+                    ),
+                }
+            )
+
+    for relationship in relationships:
+        from_event_id = relationship.from_event_id
+        to_event_id = relationship.to_event_id
+
+        # Defend against inconsistent or cross-company records.
+        if (
+            from_event_id not in event_by_id
+            or to_event_id not in event_by_id
+        ):
+            continue
+
+        relation_type = _safe_value(
+            relationship.relationship_type
+        )
+
+        evidence_status = _safe_value(
+            relationship.evidence_status
+        )
+
+        provenance = provenance_by_relationship.get(
+            relationship.id,
+            [],
+        )
+
+        supporting_source_ids = sorted(
+            {
+                item["source_id"]
+                for item in provenance
+            }
+        )
+
+        verification_methods = sorted(
+            {
+                item["verification_method"]
+                for item in provenance
+            }
+        )
+
+        provenance_available = bool(provenance)
+
+        graph.add_edge(
+            f"event:{from_event_id}",
+            f"event:{to_event_id}",
+            key=relationship.id,
+            relationship_id=relationship.id,
+            company_id=relationship.company_id,
+            relation_type=relation_type,
+            relationship_type=relation_type,
+            evidence_classification=evidence_status,
+            evidence_status=evidence_status,
+            explanation=relationship.explanation,
+            confidence=relationship.confidence,
+            created_at=_safe_value(relationship.created_at),
+            provenance_status=(
+                "verified_source_provenance_available"
+                if provenance_available
+                else "relationship_source_provenance_missing"
+            ),
+            supporting_source_ids=supporting_source_ids,
+            supporting_sources=provenance,
+            source_provenance_available=provenance_available,
+            verification_methods=verification_methods,
+            warning=(
+                None
+                if provenance_available
+                else (
+                    "No supporting source provenance is stored for "
+                    "this relationship. Treat it as an unverified "
+                    "database assertion."
+                )
+            ),
+        )
+
+    # Proposals and analyses are first-class workflow nodes, never historical
+    # product events. Source/event edges are added only for explicit persisted
+    # associations, and restricted analysis details remain hidden.
+    proposal_by_id = {
+        proposal.id: proposal
+        for proposal in db.query(Proposal)
+        .filter(Proposal.company_id == company_id)
+        .all()
+    }
+    proposal_analysis_rows = (
+        db.query(ProposalAnalysis)
+        .filter(ProposalAnalysis.proposal_id.in_(list(proposal_by_id)))
+        .all()
+    )
+    analyses_by_proposal: dict[str, list[ProposalAnalysis]] = {}
+    analysis_by_id: dict[str, ProposalAnalysis] = {}
+    for analysis in proposal_analysis_rows:
+        analyses_by_proposal.setdefault(analysis.proposal_id, []).append(analysis)
+        analysis_by_id[analysis.id] = analysis
+
+    evidence_by_analysis: dict[str, list[tuple[AnalysisEvidence, SourceDocument]]] = {}
+    restricted_analysis_ids: set[str] = set()
+    if analysis_by_id:
+        evidence_rows = (
+            db.query(AnalysisEvidence, SourceDocument)
+            .join(SourceDocument, SourceDocument.id == AnalysisEvidence.source_id)
+            .filter(AnalysisEvidence.analysis_id.in_(list(analysis_by_id)))
+            .all()
+        )
+        for evidence, source in evidence_rows:
+            evidence_by_analysis.setdefault(evidence.analysis_id, []).append(
+                (evidence, source)
+            )
+            if source.permission_status != "public":
+                restricted_analysis_ids.add(evidence.analysis_id)
+
+    event_ids_by_analysis: dict[str, set[str]] = {}
+    if analysis_by_id:
+        for row in db.execute(
+            select(
+                analysis_events.c.analysis_id,
+                analysis_events.c.event_id,
+            ).where(analysis_events.c.analysis_id.in_(list(analysis_by_id)))
+        ).all():
+            event_ids_by_analysis.setdefault(row.analysis_id, set()).add(
+                row.event_id
+            )
+
+    for proposal_id, proposal in proposal_by_id.items():
+        source_links = []
+        event_links: set[tuple[str, str]] = set()
+        for analysis in analyses_by_proposal.get(proposal_id, []):
+            if analysis.id in restricted_analysis_ids:
+                continue
+            for evidence, source in evidence_by_analysis.get(analysis.id, []):
+                if source.id in source_by_id:
+                    source_links.append((analysis, evidence, source))
+                if evidence.event_id in event_by_id:
+                    event_links.add((analysis.id, evidence.event_id))
+            for event_id in event_ids_by_analysis.get(analysis.id, set()):
+                if event_id in event_by_id:
+                    event_links.add((analysis.id, event_id))
+
+        proposal_node = f"proposal:{proposal.id}"
+        proposal_analyses = analyses_by_proposal.get(proposal_id, [])
+        latest_analysis = max(
+            proposal_analyses,
+            key=lambda item: item.created_at,
+            default=None,
+        )
+        graph.add_node(
+            proposal_node,
+            node_type="proposal",
+            proposal_id=proposal.id,
+            company_id=proposal.company_id,
+            title=proposal.title,
+            description=proposal.description,
+            proposal_status=proposal.status,
+            analysis_status=(None if latest_analysis is None else (
+                latest_analysis.status
+                if latest_analysis.id not in restricted_analysis_ids
+                else "restricted"
+            )),
+            created_at=_safe_value(proposal.created_at),
+            historical_event=False,
+            interpretation_warning=(
+                "User-submitted proposal; not a documented company event or decision."
+            ),
+        )
+        graph.add_edge(
+            company_node,
+            proposal_node,
+            relation_type="HAS_PROPOSAL",
+            provenance_status="persisted_company_proposal_association",
+        )
+
+        for analysis in proposal_analyses:
+            accessible = analysis.id not in restricted_analysis_ids
+            analysis_node = f"proposal_analysis:{analysis.id}"
+            graph.add_node(
+                analysis_node,
+                node_type="proposal_analysis",
+                analysis_id=analysis.id,
+                proposal_id=proposal.id,
+                company_id=proposal.company_id,
+                status=analysis.status if accessible else "restricted",
+                created_at=_safe_value(analysis.created_at),
+                completed_at=_safe_value(analysis.completed_at) if accessible else None,
+                recommendation_available=bool(
+                    accessible and analysis.recommendation
+                ),
+                historical_event=False,
+                interpretation_warning=(
+                    "AI-generated analysis of a user-submitted proposal; "
+                    "not a documented company decision or product event."
+                ),
+            )
+            graph.add_edge(
+                proposal_node,
+                analysis_node,
+                relation_type="HAS_ANALYSIS",
+                provenance_status="persisted_proposal_analysis_association",
+            )
+
+        for analysis, evidence, source in source_links:
+            graph.add_edge(
+                proposal_node,
+                f"source:{source.id}",
+                key=evidence.id,
+                analysis_evidence_id=evidence.id,
+                analysis_id=analysis.id,
+                relation_type="CITES_SOURCE",
+                analysis_claim=evidence.claim,
+                evidence_classification=_safe_value(
+                    evidence.evidence_classification
+                ),
+                provenance_status="persisted_analysis_evidence_source_link",
+            )
+
+        for analysis_id, event_id in sorted(event_links):
+            graph.add_edge(
+                proposal_node,
+                f"event:{event_id}",
+                key=f"{analysis_id}:{event_id}",
+                analysis_id=analysis_id,
+                relation_type="ANALYZES_EVENT",
+                provenance_status="explicit_proposal_analysis_event_link",
+                interpretation_warning=(
+                    "Stored proposal-to-event association; it does not establish causation or a historical outcome."
+                ),
+            )
+
+    return graph
+
+
+def get_graph_summary(graph: nx.MultiDiGraph) -> dict[str, Any]:
+    """Return graph statistics and node/edge counts."""
+
+    node_counts = {
+        "companies": 0,
+        "events": 0,
+        "sources": 0,
+        "proposals": 0,
+        "proposal_analyses": 0,
+    }
+
+    for _, attributes in graph.nodes(data=True):
+        node_type = attributes.get("node_type")
+
+        if node_type == "company":
+            node_counts["companies"] += 1
+        elif node_type == "event":
+            node_counts["events"] += 1
+        elif node_type == "source":
+            node_counts["sources"] += 1
+        elif node_type == "proposal":
+            node_counts["proposals"] += 1
+        elif node_type == "proposal_analysis":
+            node_counts["proposal_analyses"] += 1
+
+    relationship_counts: dict[str, int] = {}
+
+    for _, _, attributes in graph.edges(data=True):
+        relation_type = attributes.get("relation_type", "UNKNOWN")
+
+        relationship_counts[relation_type] = (
+            relationship_counts.get(relation_type, 0) + 1
+        )
+
+    provenance_relationships = sum(
+        1
+        for _, _, attributes in graph.edges(data=True)
+        if attributes.get("relationship_id") is not None
+        and attributes.get("source_provenance_available") is True
+    )
+
+    relationships_without_provenance = sum(
+        1
+        for _, _, attributes in graph.edges(data=True)
+        if attributes.get("relationship_id") is not None
+        and attributes.get("source_provenance_available") is False
+    )
+
+    return {
+        "node_count": graph.number_of_nodes(),
+        "edge_count": graph.number_of_edges(),
+        "node_counts": node_counts,
+        "relationship_counts": relationship_counts,
+        "relationships_with_provenance": provenance_relationships,
+        "relationships_without_provenance": (
+            relationships_without_provenance
+        ),
+    }
